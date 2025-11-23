@@ -27,6 +27,7 @@
 ## Commit & Pull Request Guidelines
 - Commit messages: short, imperative summaries (e.g., “Add Gemini-based graph analyzer with typing and tooling”). Group related changes per commit.
 - PRs: include a brief description, test results (`uv run pytest`, lint/format if relevant), and screenshots/GIFs for UI changes. Link issues when applicable.
+- GitHub CLI (`gh`) is available; prefer `gh pr create` / `gh pr view` / `gh pr checkout` for PR workflows after `gh auth status` confirms login.
 
 ## Security & Configuration Tips
 - Required secret: `GEMINI_API_KEY` (env var or `.streamlit/secrets.toml`). Never commit secrets or `.streamlit/secrets.toml`.
