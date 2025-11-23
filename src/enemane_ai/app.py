@@ -73,20 +73,22 @@ def resolve_gemini_client() -> GeminiGraphLanguageModel | None:
 
 def main() -> None:
     st.set_page_config(page_title="Graph Insight Uploader", layout="wide")
-    st.title("グラフ/PDFの分析ダッシュボード")
+    st.title("グラフ/PDF/気温CSVの分析ダッシュボード")
     st.caption(
-        "複数のグラフ画像やPDFをまとめてアップロードし、あらかじめ決めたプロンプトで分析します。"
+        "複数のグラフ画像やPDF、気温データのCSVをまとめてアップロードし、"
+        "あらかじめ決めたプロンプトで分析します。"
     )
 
     prompt = st.text_area("分析プロンプト (必要に応じて編集)", PRESET_PROMPT, height=120)
     uploaded_files = st.file_uploader(
         "分析したいファイルをまとめてアップロードしてください",
-        type=["png", "jpg", "jpeg", "bmp", "gif", "tiff", "pdf"],
+        type=["png", "jpg", "jpeg", "bmp", "gif", "tiff", "pdf", "csv"],
         accept_multiple_files=True,
     )
+    st.caption("CSV は「日付,気温」の2列を想定しています (例: 2024-01-01,12.3)。")
 
     if not uploaded_files:
-        st.info("画像またはPDFファイルを選択してください。")
+        st.info("画像、PDF、または気温CSVファイルを選択してください。")
         return
 
     if st.button("分析を実行", type="primary"):
@@ -99,7 +101,12 @@ def main() -> None:
                 tmpdir = Path(tmpdir_str)
                 stored_paths = save_uploads_to_temp(uploaded_files, tmpdir)
                 status.update(label="分析中...", state="running")
-                analyzed = analyze_files(stored_paths, prompt=prompt, llm=llm)
+                try:
+                    analyzed = analyze_files(stored_paths, prompt=prompt, llm=llm)
+                except Exception as exc:
+                    status.update(label="失敗", state="error")
+                    st.error(f"ファイルの処理に失敗しました: {exc}")
+                    return
             status.update(label="完了", state="complete")
 
         st.subheader("結果")

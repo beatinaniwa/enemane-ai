@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from google.genai import types as genai_types
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 from pypdf import PdfWriter
 from pytest import MonkeyPatch
 
@@ -52,6 +52,26 @@ def test_collect_graph_entries_from_png_and_pdf(tmp_path: Path) -> None:
     assert any("plot.png" in label for label in labels)
     assert any("doc.pdf#1" in label for label in labels)
     assert all(entry.image.size[0] > 0 for entry in entries)
+
+
+def test_collect_graph_entries_from_temperature_csv(tmp_path: Path) -> None:
+    csv_path = tmp_path / "temperature.csv"
+    csv_path.write_text(
+        "date,temp_c\n" "2024-01-01,8.5\n" "2024-01-02,12.3\n" "2024-01-03,5.0\n",
+        encoding="utf-8",
+    )
+
+    entries = collect_graph_entries([csv_path])
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.display_label == "temperature.csv"
+    assert entry.image.size == analyzer.CSV_CHART_SIZE
+    diff = ImageChops.difference(
+        entry.image.convert("RGB"),
+        Image.new("RGB", entry.image.size, "white"),
+    )
+    assert diff.getbbox() is not None
 
 
 def test_gemini_model_uses_env_key(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
