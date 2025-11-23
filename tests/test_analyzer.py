@@ -1,12 +1,12 @@
 from pathlib import Path
 
 from google.genai import types as genai_types
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageDraw
 from pypdf import PdfWriter
 from pytest import MonkeyPatch
 
 from enemane_ai import analyzer
-from enemane_ai.analyzer import PRESET_PROMPT, analyze_image, collect_graph_entries
+from enemane_ai.analyzer import PRESET_PROMPT, analyze_image, analyze_text, collect_graph_entries
 
 
 class DummyLLM:
@@ -14,10 +14,17 @@ class DummyLLM:
         self.response = response
         self.calls = 0
         self.last_prompt: str | None = None
+        self.last_text: str | None = None
 
     def comment_on_graph(self, image: Image.Image, prompt: str) -> str:
         self.calls += 1
         self.last_prompt = prompt
+        return self.response
+
+    def comment_on_text(self, text: str, prompt: str) -> str:
+        self.calls += 1
+        self.last_prompt = prompt
+        self.last_text = text
         return self.response
 
 
@@ -30,6 +37,17 @@ def test_analyze_image_mentions_brightness_levels() -> None:
     assert comment == "LLM response"
     assert llm.calls == 1
     assert llm.last_prompt == "custom prompt"
+
+
+def test_analyze_text_uses_llm() -> None:
+    llm = DummyLLM("text response")
+
+    comment = analyze_text("2024-01-01,8.5", prompt="csv prompt", llm=llm)
+
+    assert comment == "text response"
+    assert llm.calls == 1
+    assert llm.last_prompt == "csv prompt"
+    assert llm.last_text == "2024-01-01,8.5"
 
 
 def test_collect_graph_entries_from_png_and_pdf(tmp_path: Path) -> None:
@@ -51,7 +69,7 @@ def test_collect_graph_entries_from_png_and_pdf(tmp_path: Path) -> None:
     assert len(entries) == 2
     assert any("plot.png" in label for label in labels)
     assert any("doc.pdf#1" in label for label in labels)
-    assert all(entry.image.size[0] > 0 for entry in entries)
+    assert all(entry.image is not None and entry.image.size[0] > 0 for entry in entries)
 
 
 def test_collect_graph_entries_from_temperature_csv(tmp_path: Path) -> None:
@@ -66,12 +84,9 @@ def test_collect_graph_entries_from_temperature_csv(tmp_path: Path) -> None:
     assert len(entries) == 1
     entry = entries[0]
     assert entry.display_label == "temperature.csv"
-    assert entry.image.size == analyzer.CSV_CHART_SIZE
-    diff = ImageChops.difference(
-        entry.image.convert("RGB"),
-        Image.new("RGB", entry.image.size, "white"),
-    )
-    assert diff.getbbox() is not None
+    assert entry.image is None
+    assert entry.text is not None
+    assert "2024-01-02,12.3" in entry.text
 
 
 def test_gemini_model_uses_env_key(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
@@ -121,3 +136,7 @@ def test_gemini_model_uses_env_key(monkeypatch: MonkeyPatch, tmp_path: Path) -> 
     inline_data = image_part.inline_data
     assert inline_data is not None
     assert inline_data.mime_type == "image/png"
+
+    text_comment = model.comment_on_text("raw csv content", PRESET_PROMPT)
+    assert text_comment == "Gemini says hello"
+    assert calls.contents == [PRESET_PROMPT, "raw csv content"]

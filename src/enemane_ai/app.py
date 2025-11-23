@@ -14,6 +14,7 @@ from enemane_ai.analyzer import (
     GeminiGraphLanguageModel,
     GraphLanguageModel,
     analyze_image,
+    analyze_text,
     collect_graph_entries,
 )
 
@@ -25,7 +26,8 @@ if TYPE_CHECKING:
 class AnalyzedGraph:
     label: str
     comment: str
-    image_data: bytes
+    image_data: bytes | None = None
+    text: str | None = None
 
 
 def save_uploads_to_temp(files: Iterable["UploadedFile"], tmpdir: Path) -> list[Path]:
@@ -45,12 +47,22 @@ def analyze_files(
     entries = collect_graph_entries(file_paths)
     analyzed: list[AnalyzedGraph] = []
     for entry in entries:
-        comment = analyze_image(entry.image, prompt=prompt, llm=llm)
-        buffer = BytesIO()
-        entry.image.save(buffer, format="PNG")
-        analyzed.append(
-            AnalyzedGraph(label=entry.display_label, comment=comment, image_data=buffer.getvalue())
-        )
+        if entry.image is not None:
+            comment = analyze_image(entry.image, prompt=prompt, llm=llm)
+            buffer = BytesIO()
+            entry.image.save(buffer, format="PNG")
+            analyzed.append(
+                AnalyzedGraph(
+                    label=entry.display_label, comment=comment, image_data=buffer.getvalue()
+                )
+            )
+            continue
+
+        if entry.text is not None:
+            comment = analyze_text(entry.text, prompt=prompt, llm=llm)
+            analyzed.append(
+                AnalyzedGraph(label=entry.display_label, comment=comment, text=entry.text)
+            )
     return analyzed
 
 
@@ -111,11 +123,17 @@ def main() -> None:
 
         st.subheader("結果")
         for item in analyzed:
-            col_image, col_comment = st.columns([1, 2], gap="large")
-            with col_image:
-                st.image(item.image_data, caption=item.label, use_column_width=True)
-            with col_comment:
+            if item.image_data is not None:
+                col_image, col_comment = st.columns([1, 2], gap="large")
+                with col_image:
+                    st.image(item.image_data, caption=item.label, use_column_width=True)
+                with col_comment:
+                    st.markdown(f"**{item.label}**")
+                    st.markdown(item.comment)
+            else:
                 st.markdown(f"**{item.label}**")
+                if item.text:
+                    st.code(item.text, language="text")
                 st.markdown(item.comment)
 
 

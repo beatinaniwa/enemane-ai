@@ -10,7 +10,7 @@ from typing import Iterable, Protocol, Sequence, cast
 import pypdfium2 as pdfium
 from google import genai
 from google.genai import types as genai_types
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
 PRESET_PROMPT = (
     "あなたはグラフリテラシーに長けたアナリストです。"
@@ -20,14 +20,14 @@ PRESET_PROMPT = (
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tiff"}
 CSV_EXTENSIONS = {".csv"}
-CSV_CHART_SIZE = (900, 520)
 DEFAULT_MODEL_NAME = "gemini-3-pro-preview"
 
 
 @dataclass
 class GraphEntry:
     display_label: str
-    image: Image.Image
+    image: Image.Image | None = None
+    text: str | None = None
 
 
 def collect_graph_entries(paths: Iterable[Path]) -> list[GraphEntry]:
@@ -68,6 +68,8 @@ def pdf_to_images(path: Path) -> list[tuple[int, Image.Image]]:
 class GraphLanguageModel(Protocol):
     def comment_on_graph(self, image: Image.Image, prompt: str) -> str: ...
 
+    def comment_on_text(self, text: str, prompt: str) -> str: ...
+
 
 class GeminiGraphLanguageModel:
     def __init__(self, api_key: str, model_name: str = DEFAULT_MODEL_NAME):
@@ -91,6 +93,14 @@ class GeminiGraphLanguageModel:
         )
         return response.text or ""
 
+    def comment_on_text(self, text: str, prompt: str) -> str:
+        contents = cast(genai_types.ContentListUnionDict, [prompt, text])
+        response = self.client.models.generate_content(
+            model=self.model_name,
+            contents=contents,
+        )
+        return response.text or ""
+
     @staticmethod
     def _image_part(image: Image.Image) -> genai_types.Part:
         buffer = BytesIO()
@@ -103,8 +113,8 @@ class GeminiGraphLanguageModel:
 
 def csv_to_graph_entry(path: Path) -> GraphEntry:
     series = parse_temperature_csv(path)
-    image = render_temperature_chart(series, title=path.stem)
-    return GraphEntry(display_label=path.name, image=image)
+    text = format_temperature_series(series)
+    return GraphEntry(display_label=path.name, text=text)
 
 
 def parse_temperature_csv(path: Path) -> list[tuple[str, float]]:
@@ -129,95 +139,26 @@ def parse_temperature_csv(path: Path) -> list[tuple[str, float]]:
     return rows
 
 
-def render_temperature_chart(series: Sequence[tuple[str, float]], title: str) -> Image.Image:
-    width, height = CSV_CHART_SIZE
-    margin_left, margin_right = 80, 30
-    margin_top, margin_bottom = 60, 80
-    plot_width = width - margin_left - margin_right
-    plot_height = height - margin_top - margin_bottom
+def format_temperature_series(series: Sequence[tuple[str, float]]) -> str:
+    lines = ["日付,気温(°C)"]
+    lines.extend(f"{label},{temperature}" for label, temperature in series)
+    return "\n".join(lines)
 
-    image = Image.new("RGB", (width, height), "white")
-    draw = ImageDraw.Draw(image)
-    font = ImageFont.load_default()
 
-    temperatures = [item[1] for item in series]
-    min_temp = min(temperatures)
-    max_temp = max(temperatures)
-    if max_temp == min_temp:
-        min_temp -= 1
-        max_temp += 1
-    padding = (max_temp - min_temp) * 0.05
-    min_temp -= padding
-    max_temp += padding
+def analyze_text(
+    text: str,
+    prompt: str = PRESET_PROMPT,
+    llm: GraphLanguageModel | None = None,
+) -> str:
+    try:
+        model = llm or GeminiGraphLanguageModel.from_env()
+    except Exception as exc:
+        return f"{prompt}\n- Gemini呼び出しに失敗しました: {exc}"
 
-    def y_for(value: float) -> float:
-        normalized = (value - min_temp) / (max_temp - min_temp)
-        return height - margin_bottom - (normalized * plot_height)
-
-    step = plot_width / max(len(series) - 1, 1)
-    points = [(margin_left + index * step, y_for(temp)) for index, (_, temp) in enumerate(series)]
-
-    draw.rectangle(
-        (
-            margin_left,
-            margin_top,
-            width - margin_right,
-            height - margin_bottom,
-        ),
-        outline="#d0d7de",
-        width=1,
-    )
-    draw.line(
-        (
-            margin_left,
-            height - margin_bottom,
-            width - margin_right,
-            height - margin_bottom,
-        ),
-        fill="black",
-        width=2,
-    )
-    draw.line(
-        (
-            margin_left,
-            height - margin_bottom,
-            margin_left,
-            margin_top,
-        ),
-        fill="black",
-        width=2,
-    )
-
-    draw.text((margin_left, 20), f"{title} の気温推移", fill="black", font=font)
-    draw.text((10, margin_top - 10), f"最高 {max_temp:.1f}°C", fill="gray", font=font)
-    draw.text(
-        (10, height - margin_bottom - 10),
-        f"最低 {min_temp:.1f}°C",
-        fill="gray",
-        font=font,
-    )
-
-    for index, (label, _) in enumerate(series):
-        if index not in {0, len(series) // 2, len(series) - 1}:
-            continue
-        x = margin_left + (index * step if len(series) > 1 else plot_width / 2)
-        draw.text(
-            (x - 10, height - margin_bottom + 8),
-            label,
-            fill="gray",
-            font=font,
-        )
-
-    if len(points) == 1:
-        x, y = points[0]
-        draw.ellipse((x - 4, y - 4, x + 4, y + 4), fill="#1e88e5", outline="#1e88e5")
-        return image
-
-    draw.line(points, fill="#1e88e5", width=3)
-    for x, y in points:
-        draw.ellipse((x - 3, y - 3, x + 3, y + 3), fill="#1e88e5", outline="#1e88e5")
-
-    return image
+    try:
+        return model.comment_on_text(text, prompt)
+    except Exception as exc:
+        return f"{prompt}\n- Gemini呼び出しに失敗しました: {exc}"
 
 
 def analyze_image(
