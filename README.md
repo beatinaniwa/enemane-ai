@@ -1,6 +1,6 @@
 # enemane-ai
 
-グラフ画像 / PDF をまとめてアップロードし、決められたプロンプトに基づいてコメントを返す Streamlit アプリです。パッケージ管理は `uv` を使用し、Python 3.13 を想定しています。グラフの要約には Google Gemini (gemini-2.5-pro) を利用します。
+グラフ画像 / PDF をまとめてアップロードし、決められたプロンプトに基づいてコメントを返す Streamlit アプリです。パッケージ管理は `uv` を使用し、Python 3.13 を想定しています。グラフの要約には Google Gemini (gemini-3-pro-preview) を利用します。
 
 ## セットアップ
 

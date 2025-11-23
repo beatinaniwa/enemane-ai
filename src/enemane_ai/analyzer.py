@@ -18,7 +18,7 @@ PRESET_PROMPT = (
 )
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tiff"}
-DEFAULT_MODEL_NAME = "gemini-2.5-pro"
+DEFAULT_MODEL_NAME = "gemini-3-pro-preview"
 
 
 @dataclass
