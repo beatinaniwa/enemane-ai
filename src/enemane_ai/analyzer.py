@@ -12,11 +12,30 @@ from google import genai
 from google.genai import types as genai_types
 from PIL import Image
 
-PRESET_PROMPT = (
+DEFAULT_PRESET_PROMPT = (
     "あなたはグラフリテラシーに長けたアナリストです。"
     " 以下のフォーマットで簡潔にコメントを返してください:"
     " 1) トレンド 2) 読み取れる含意 3) 注意点。"
 )
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PRESET_PROMPT_PATH = PROJECT_ROOT / "prompt.md"
+
+
+def _load_preset_prompt(prompt_path: Path = PRESET_PROMPT_PATH) -> str:
+    try:
+        content = prompt_path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
+        return DEFAULT_PRESET_PROMPT
+
+    stripped = content.strip()
+    if stripped:
+        return stripped
+    return DEFAULT_PRESET_PROMPT
+
+
+PRESET_PROMPT = _load_preset_prompt()
+
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tiff"}
 CSV_EXTENSIONS = {".csv"}
@@ -165,12 +184,12 @@ def analyze_text(
     try:
         model = llm or GeminiGraphLanguageModel.from_env()
     except Exception as exc:
-        return f"{prompt}\n- Gemini呼び出しに失敗しました: {exc}"
+        return f"Gemini呼び出しに失敗しました: {exc}"
 
     try:
         return model.comment_on_text(text, prompt)
     except Exception as exc:
-        return f"{prompt}\n- Gemini呼び出しに失敗しました: {exc}"
+        return f"Gemini呼び出しに失敗しました: {exc}"
 
 
 def analyze_image(
@@ -181,9 +200,9 @@ def analyze_image(
     try:
         model = llm or GeminiGraphLanguageModel.from_env()
     except Exception as exc:
-        return f"{prompt}\n- Gemini呼び出しに失敗しました: {exc}"
+        return f"Gemini呼び出しに失敗しました: {exc}"
 
     try:
         return model.comment_on_graph(image, prompt)
     except Exception as exc:
-        return f"{prompt}\n- Gemini呼び出しに失敗しました: {exc}"
+        return f"Gemini呼び出しに失敗しました: {exc}"

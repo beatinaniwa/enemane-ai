@@ -28,6 +28,27 @@ class DummyLLM:
         return self.response
 
 
+def test_load_preset_prompt_from_file(tmp_path: Path) -> None:
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text("file preset prompt", encoding="utf-8")
+
+    prompt = analyzer._load_preset_prompt(prompt_path)
+
+    assert prompt == "file preset prompt"
+
+
+def test_load_preset_prompt_falls_back_when_missing_or_blank(tmp_path: Path) -> None:
+    missing_prompt = analyzer._load_preset_prompt(tmp_path / "missing.md")
+    assert missing_prompt == analyzer.DEFAULT_PRESET_PROMPT
+
+    blank_path = tmp_path / "blank.md"
+    blank_path.write_text(" \n", encoding="utf-8")
+
+    blank_prompt = analyzer._load_preset_prompt(blank_path)
+
+    assert blank_prompt == analyzer.DEFAULT_PRESET_PROMPT
+
+
 def test_analyze_image_mentions_brightness_levels() -> None:
     llm = DummyLLM("LLM response")
     image = Image.new("RGB", (24, 24), "white")
@@ -48,6 +69,15 @@ def test_analyze_text_uses_llm() -> None:
     assert llm.calls == 1
     assert llm.last_prompt == "csv prompt"
     assert llm.last_text == "2024-01-01,8.5"
+
+
+def test_analyze_text_does_not_leak_prompt_on_error(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    result = analyze_text("text content", prompt="top-secret prompt")
+
+    assert "top-secret prompt" not in result
+    assert "失敗しました" in result
 
 
 def test_collect_graph_entries_from_png_and_pdf(tmp_path: Path) -> None:
