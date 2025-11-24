@@ -126,14 +126,12 @@ def main() -> None:
             if item.image_data is not None:
                 col_image, col_comment = st.columns([1, 2], gap="large")
                 with col_image:
-                    st.image(item.image_data, caption=item.label, use_column_width=True)
+                    st.image(item.image_data, caption=item.label, use_container_width=True)
                 with col_comment:
                     st.markdown(f"**{item.label}**")
                     st.markdown(item.comment)
             else:
                 st.markdown(f"**{item.label}**")
-                if item.text:
-                    st.code(item.text, language="text")
                 st.markdown(item.comment)
 
 

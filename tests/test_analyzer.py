@@ -89,6 +89,30 @@ def test_collect_graph_entries_from_temperature_csv(tmp_path: Path) -> None:
     assert "2024-01-02,12.3" in entry.text
 
 
+def test_collect_graph_entries_from_shift_jis_temperature_csv(tmp_path: Path) -> None:
+    csv_path = tmp_path / "maebashi_shift_jis.csv"
+    csv_path.write_bytes(
+        (
+            "ダウンロードした時刻：2025/10/08 12:19:10\r\n"  # noqa: RUF001
+            "\r\n"
+            ",前橋,前橋\r\n"
+            "年月日時,気温(℃),品質情報\r\n"
+            "2023/10/1 1:00:00,22.9,8\r\n"
+            "2023/10/1 2:00:00,22.3,8\r\n"
+        ).encode("cp932")
+    )
+
+    entries = collect_graph_entries([csv_path])
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.display_label == "maebashi_shift_jis.csv"
+    assert entry.image is None
+    assert entry.text is not None
+    assert "2023/10/1 1:00:00,22.9" in entry.text
+    assert "2023/10/1 2:00:00,22.3" in entry.text
+
+
 def test_gemini_model_uses_env_key(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     class CallLog:
         def __init__(self) -> None:

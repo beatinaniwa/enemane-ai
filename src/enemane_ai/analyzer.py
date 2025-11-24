@@ -117,21 +117,33 @@ def csv_to_graph_entry(path: Path) -> GraphEntry:
     return GraphEntry(display_label=path.name, text=text)
 
 
+def _read_csv_rows(path: Path) -> list[list[str]]:
+    errors: list[Exception] = []
+    for encoding in ("utf-8", "cp932"):  # Shift_JIS (Windows) fallback
+        try:
+            with path.open(encoding=encoding, newline="") as fp:
+                return list(csv.reader(fp))
+        except UnicodeDecodeError as exc:
+            errors.append(exc)
+
+    error_details = "; ".join(str(error) for error in errors)
+    msg = f"CSV {path.name} を UTF-8/Shift_JIS として読み取れませんでした: {error_details}"
+    raise ValueError(msg)
+
+
 def parse_temperature_csv(path: Path) -> list[tuple[str, float]]:
     rows: list[tuple[str, float]] = []
-    with path.open(encoding="utf-8") as fp:
-        reader = csv.reader(fp)
-        for row in reader:
-            if len(row) < 2:
-                continue
-            label = row[0].strip()
-            try:
-                temperature = float(row[1])
-            except ValueError:
-                continue
-            if not label:
-                continue
-            rows.append((label, temperature))
+    for row in _read_csv_rows(path):
+        if len(row) < 2:
+            continue
+        label = row[0].strip()
+        try:
+            temperature = float(row[1])
+        except ValueError:
+            continue
+        if not label:
+            continue
+        rows.append((label, temperature))
 
     if not rows:
         msg = f"CSV {path.name} に有効な気温データがありません"
