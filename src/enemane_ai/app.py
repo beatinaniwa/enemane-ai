@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 from dataclasses import dataclass
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -115,6 +116,22 @@ def strip_code_fence(text: str) -> str:
     return text
 
 
+def strip_markdown(text: str) -> str:
+    # Bold: **text** or __text__
+    text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text)
+    # Italic: *text* or _text_
+    text = re.sub(r"(\*|_)(.*?)\1", r"\2", text)
+    # Links: [text](url) -> text
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    # Inline code: `text` -> text
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    # Headers: # text -> text (remove leading # and space)
+    text = re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)
+    # List markers: - text, * text -> text (remove leading marker and space)
+    text = re.sub(r"^[\*\-]\s+", "", text, flags=re.MULTILINE)
+    return text.strip()
+
+
 def parse_structured_comment(raw_comment: str, fallback_label: str) -> tuple[str, str, str]:
     cleaned = strip_code_fence(raw_comment)
     try:
@@ -152,47 +169,16 @@ def build_result_rows(analyzed: list[AnalyzedGraph]) -> list[ResultRow]:
         comment = item.comment
         if not comment and item.text is not None:
             comment = "CSV/テキストはコメント生成を省略しています。"
-        rows.append(ResultRow(image_title=image_title, item_name=item_name, comment=comment))
-    return rows
 
-
-def escape_markdown_cell(text: str) -> str:
-    replacements = {
-        "\\": "\\\\",
-        "|": "\\|",
-        "*": "\\*",
-        "_": "\\_",
-        "`": "\\`",
-        "~": "\\~",
-        "[": "\\[",
-        "]": "\\]",
-        "(": "\\(",
-        ")": "\\)",
-        "#": "\\#",
-        "+": "\\+",
-        "-": "\\-",
-        "!": "\\!",
-        ">": "\\>",
-    }
-    escaped = "".join(replacements.get(char, char) for char in text)
-    return escaped.replace("\n", "<br>")
-
-
-def render_table_markdown(rows: list[ResultRow]) -> str:
-    header = "| 画像内タイトル | 項目名 | AIで生成したコメント |"
-    divider = "| --- | --- | --- |"
-    lines = [header, divider]
-    lines.extend(
-        [
-            (
-                f"| {escape_markdown_cell(row.image_title)}"
-                f" | {escape_markdown_cell(row.item_name)}"
-                f" | {escape_markdown_cell(row.comment)} |"
+        # テーブル出力用にMarkdownを除去してプレーンテキスト化
+        rows.append(
+            ResultRow(
+                image_title=strip_markdown(image_title),
+                item_name=strip_markdown(item_name),
+                comment=strip_markdown(comment),
             )
-            for row in rows
-        ]
-    )
-    return "\n".join(lines)
+        )
+    return rows
 
 
 def export_table_csv(rows: list[ResultRow]) -> bytes:
@@ -245,7 +231,18 @@ def main() -> None:
         st.subheader("結果")
         result_rows = build_result_rows(analyzed)
         st.markdown("#### テーブル出力")
-        st.markdown(render_table_markdown(result_rows))
+
+        # st.table 用のデータを作成(テキストを全て表示するため)
+        table_data = [
+            {
+                "画像内タイトル": row.image_title,
+                "項目名": row.item_name,
+                "AIで生成したコメント": row.comment,
+            }
+            for row in result_rows
+        ]
+        st.table(table_data)
+
         st.download_button(
             "CSVをダウンロード",
             data=export_table_csv(result_rows),

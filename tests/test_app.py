@@ -8,10 +8,8 @@ from enemane_ai.app import (
     ResultRow,
     analyze_files,
     build_result_rows,
-    escape_markdown_cell,
     export_table_csv,
     parse_structured_comment,
-    render_table_markdown,
 )
 
 
@@ -104,16 +102,26 @@ def test_build_result_rows_ignores_csv_entries() -> None:
     assert rows[0].image_title == "chart.png"
 
 
-def test_render_table_markdown_escapes_cells() -> None:
-    rows = [ResultRow(image_title="doc|1", item_name="グラフ画像", comment="**line1**\nline2")]
+def test_build_result_rows_strips_markdown() -> None:
+    analyzed = [
+        AnalyzedGraph(
+            label="**Bold Title**",
+            image_title="**Bold Title**",
+            item_name="*Italic Item*",
+            comment="Check [Link](http://example.com) and `Code`\n- List",
+            image_data=b"raw",
+        ),
+    ]
 
-    rendered = render_table_markdown(rows)
+    rows = build_result_rows(analyzed)
 
-    assert "doc\\|1" in rendered
-    assert "\\*\\*line1\\*\\*" in rendered
-    assert "<br>" in rendered
-    assert rendered.startswith("| 画像内タイトル | 項目名 | AIで生成したコメント |")
-    assert escape_markdown_cell("a|b") == "a\\|b"
+    assert rows[0].image_title == "Bold Title"
+    assert rows[0].item_name == "Italic Item"
+    # Newlines are preserved by strip_markdown
+    assert "Check Link and Code" in rows[0].comment
+    assert "List" in rows[0].comment
+    assert "**" not in rows[0].comment
+    assert "[" not in rows[0].comment  # Links removed
 
 
 def test_export_table_csv_outputs_headers_and_rows() -> None:
