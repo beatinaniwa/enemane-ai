@@ -2,6 +2,7 @@ __pycache__/
 .ruff_cache/
 .uv/
 .venv/
+.streamlit/
 .pytest_cache/
 .DS_Store
 *.pyc
