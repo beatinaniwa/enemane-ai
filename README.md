@@ -1,6 +1,6 @@
 # enemane-ai
 
-グラフ画像 / PDF をまとめてアップロードし、決められたプロンプトに基づいてコメントを返す Streamlit アプリです。パッケージ管理は `uv` を使用し、Python 3.13 を想定しています。グラフの要約には Google Gemini (gemini-3-pro-preview) を利用します。
+グラフ画像 / PDF / 気温CSV をまとめてアップロードし、決められたプロンプトに基づいてコメントを返す Streamlit アプリです。パッケージ管理は `uv` を使用し、Python 3.13 を想定しています。グラフの要約には Google Gemini (gemini-3-pro-preview) を利用します。
 
 ## セットアップ
 
@@ -32,6 +32,9 @@
 ```bash
 uv run streamlit run src/enemane_ai/app.py
 ```
+
+CSV をアップロードする場合は、`日付,気温` の2列構成を想定しています (例: `2024-01-01,12.3`)。
+CSV はグラフ化せず、そのままテキストとして解析に渡されます。
 
 ## コード品質
 
