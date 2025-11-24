@@ -50,6 +50,15 @@ def test_analyze_text_uses_llm() -> None:
     assert llm.last_text == "2024-01-01,8.5"
 
 
+def test_analyze_text_does_not_leak_prompt_on_error(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    result = analyze_text("text content", prompt="top-secret prompt")
+
+    assert "top-secret prompt" not in result
+    assert "失敗しました" in result
+
+
 def test_collect_graph_entries_from_png_and_pdf(tmp_path: Path) -> None:
     png_path = tmp_path / "plot.png"
     base = Image.new("RGB", (80, 60), "white")

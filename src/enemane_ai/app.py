@@ -198,7 +198,15 @@ def main() -> None:
         "あらかじめ決めたプロンプトで分析します。"
     )
 
-    prompt = st.text_area("分析プロンプト (必要に応じて編集)", PRESET_PROMPT, height=120)
+    st.caption("分析プロンプトは固定です。追加で伝えたいことがあれば下記に記入してください。")
+    additional_instructions = st.text_area(
+        "追加の指示 (任意)",
+        placeholder="例: 重要なトレンドのみを箇条書きでまとめてください。",
+        height=120,
+    )
+    prompt = PRESET_PROMPT
+    if additional_instructions.strip():
+        prompt = f"{PRESET_PROMPT}\n\n{additional_instructions.strip()}"
     uploaded_files = st.file_uploader(
         "分析したいファイルをまとめてアップロードしてください",
         type=["png", "jpg", "jpeg", "bmp", "gif", "tiff", "pdf", "csv"],
