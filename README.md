@@ -9,11 +9,14 @@
    ```bash
    uv sync --dev
    ```
-3. Google Gemini API キーを環境変数に設定:
+3. Google Gemini API キーを `.streamlit/secrets.toml` に設定:
    ```bash
-   export GEMINI_API_KEY="your-key"
+   mkdir -p .streamlit
+   cat <<'EOF' > .streamlit/secrets.toml
+   GEMINI_API_KEY = "your-key"
+   EOF
    ```
-   Streamlit の `secrets.toml` (`.streamlit/secrets.toml`) に `GEMINI_API_KEY` を置いても構いません。
+   環境変数 `GEMINI_API_KEY` を使う場合でも動作します。
 4. pre-commit をインストール:
    ```bash
    uv run pre-commit install

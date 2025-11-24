@@ -72,7 +72,7 @@ def resolve_gemini_client() -> GeminiGraphLanguageModel | None:
     if not api_key:
         st.error(
             "GEMINI_API_KEY が見つかりません。"
-            " 環境変数または .streamlit/secrets.toml に設定してください。"
+            " .streamlit/secrets.toml に設定してください (環境変数 GEMINI_API_KEY でも可)。"
         )
         return None
 
