@@ -132,8 +132,6 @@ def main() -> None:
                     st.markdown(item.comment)
             else:
                 st.markdown(f"**{item.label}**")
-                if item.text:
-                    st.code(item.text, language="text")
                 st.markdown(item.comment)
 
 
