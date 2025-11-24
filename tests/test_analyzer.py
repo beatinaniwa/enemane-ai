@@ -1,3 +1,4 @@
+import csv
 from pathlib import Path
 
 from google.genai import types as genai_types
@@ -7,6 +8,7 @@ from pytest import MonkeyPatch
 
 from enemane_ai import analyzer
 from enemane_ai.analyzer import PRESET_PROMPT, analyze_image, analyze_text, collect_graph_entries
+from enemane_ai.app import AnalyzedGraph, build_results_csv
 
 
 class DummyLLM:
@@ -70,6 +72,12 @@ def test_collect_graph_entries_from_png_and_pdf(tmp_path: Path) -> None:
     assert any("plot.png" in label for label in labels)
     assert any("doc.pdf#1" in label for label in labels)
     assert all(entry.image is not None and entry.image.size[0] > 0 for entry in entries)
+    png_entry = next(entry for entry in entries if entry.display_label.endswith("plot.png"))
+    assert png_entry.page_name == "plot.png"
+    assert png_entry.graph_name == "plot.png"
+    pdf_entry = next(entry for entry in entries if entry.display_label.startswith("doc.pdf#"))
+    assert pdf_entry.page_name == "doc.pdf#1"
+    assert pdf_entry.graph_name == "doc.pdf"
 
 
 def test_collect_graph_entries_from_temperature_csv(tmp_path: Path) -> None:
@@ -84,6 +92,8 @@ def test_collect_graph_entries_from_temperature_csv(tmp_path: Path) -> None:
     assert len(entries) == 1
     entry = entries[0]
     assert entry.display_label == "temperature.csv"
+    assert entry.page_name == "temperature.csv"
+    assert entry.graph_name == "temperature.csv"
     assert entry.image is None
     assert entry.text is not None
     assert "2024-01-02,12.3" in entry.text
@@ -107,6 +117,8 @@ def test_collect_graph_entries_from_shift_jis_temperature_csv(tmp_path: Path) ->
     assert len(entries) == 1
     entry = entries[0]
     assert entry.display_label == "maebashi_shift_jis.csv"
+    assert entry.page_name == "maebashi_shift_jis.csv"
+    assert entry.graph_name == "maebashi_shift_jis.csv"
     assert entry.image is None
     assert entry.text is not None
     assert "2023/10/1 1:00:00,22.9" in entry.text
@@ -164,3 +176,27 @@ def test_gemini_model_uses_env_key(monkeypatch: MonkeyPatch, tmp_path: Path) -> 
     text_comment = model.comment_on_text("raw csv content", PRESET_PROMPT)
     assert text_comment == "Gemini says hello"
     assert calls.contents == [PRESET_PROMPT, "raw csv content"]
+
+
+def test_build_results_csv_contains_expected_columns() -> None:
+    analyzed = [
+        AnalyzedGraph(
+            label="report.pdf#1",
+            comment="page comment",
+            page_name="report.pdf#1",
+            graph_name="report.pdf",
+        ),
+        AnalyzedGraph(
+            label="plot.png",
+            comment="plot comment",
+            page_name="plot.png",
+            graph_name="plot.png",
+        ),
+    ]
+
+    csv_bytes = build_results_csv(analyzed)
+
+    rows = list(csv.reader(csv_bytes.decode("utf-8").splitlines()))
+    assert rows[0] == ["ページ名", "グラフ名", "生成したコメント"]
+    assert rows[1] == ["report.pdf#1", "report.pdf", "page comment"]
+    assert rows[2] == ["plot.png", "plot.png", "plot comment"]

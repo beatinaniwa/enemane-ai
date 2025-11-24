@@ -28,6 +28,8 @@ class GraphEntry:
     display_label: str
     image: Image.Image | None = None
     text: str | None = None
+    page_name: str | None = None
+    graph_name: str | None = None
 
 
 def collect_graph_entries(paths: Iterable[Path]) -> list[GraphEntry]:
@@ -36,13 +38,27 @@ def collect_graph_entries(paths: Iterable[Path]) -> list[GraphEntry]:
         suffix = path.suffix.lower()
         if suffix in IMAGE_EXTENSIONS:
             with Image.open(path) as img:
-                entries.append(GraphEntry(display_label=path.name, image=img.convert("RGB")))
+                entries.append(
+                    GraphEntry(
+                        display_label=path.name,
+                        image=img.convert("RGB"),
+                        page_name=path.name,
+                        graph_name=path.name,
+                    )
+                )
             continue
 
         if suffix == ".pdf":
             for page_index, page_image in pdf_to_images(path):
                 label = f"{path.name}#{page_index + 1}"
-                entries.append(GraphEntry(display_label=label, image=page_image))
+                entries.append(
+                    GraphEntry(
+                        display_label=label,
+                        image=page_image,
+                        page_name=label,
+                        graph_name=path.name,
+                    )
+                )
             continue
 
         if suffix in CSV_EXTENSIONS:
@@ -114,7 +130,12 @@ class GeminiGraphLanguageModel:
 def csv_to_graph_entry(path: Path) -> GraphEntry:
     series = parse_temperature_csv(path)
     text = format_temperature_series(series)
-    return GraphEntry(display_label=path.name, text=text)
+    return GraphEntry(
+        display_label=path.name,
+        text=text,
+        page_name=path.name,
+        graph_name=path.name,
+    )
 
 
 def _read_csv_rows(path: Path) -> list[list[str]]:

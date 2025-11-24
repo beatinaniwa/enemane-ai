@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import csv
 import os
 from dataclasses import dataclass
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Iterable
@@ -26,6 +27,8 @@ if TYPE_CHECKING:
 class AnalyzedGraph:
     label: str
     comment: str
+    page_name: str
+    graph_name: str
     image_data: bytes | None = None
     text: str | None = None
 
@@ -47,13 +50,19 @@ def analyze_files(
     entries = collect_graph_entries(file_paths)
     analyzed: list[AnalyzedGraph] = []
     for entry in entries:
+        page_name = entry.page_name or entry.display_label
+        graph_name = entry.graph_name or entry.display_label
         if entry.image is not None:
             comment = analyze_image(entry.image, prompt=prompt, llm=llm)
             buffer = BytesIO()
             entry.image.save(buffer, format="PNG")
             analyzed.append(
                 AnalyzedGraph(
-                    label=entry.display_label, comment=comment, image_data=buffer.getvalue()
+                    label=entry.display_label,
+                    comment=comment,
+                    page_name=page_name,
+                    graph_name=graph_name,
+                    image_data=buffer.getvalue(),
                 )
             )
             continue
@@ -61,9 +70,24 @@ def analyze_files(
         if entry.text is not None:
             comment = analyze_text(entry.text, prompt=prompt, llm=llm)
             analyzed.append(
-                AnalyzedGraph(label=entry.display_label, comment=comment, text=entry.text)
+                AnalyzedGraph(
+                    label=entry.display_label,
+                    comment=comment,
+                    page_name=page_name,
+                    graph_name=graph_name,
+                    text=entry.text,
+                )
             )
     return analyzed
+
+
+def build_results_csv(analyzed: Iterable[AnalyzedGraph]) -> bytes:
+    buffer = StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(["ページ名", "グラフ名", "生成したコメント"])
+    for item in analyzed:
+        writer.writerow([item.page_name, item.graph_name, item.comment])
+    return buffer.getvalue().encode("utf-8")
 
 
 def resolve_gemini_client() -> GeminiGraphLanguageModel | None:
@@ -122,6 +146,13 @@ def main() -> None:
             status.update(label="完了", state="complete")
 
         st.subheader("結果")
+        csv_bytes = build_results_csv(analyzed)
+        st.download_button(
+            "CSV をダウンロード",
+            data=csv_bytes,
+            file_name="analysis_results.csv",
+            mime="text/csv",
+        )
         for item in analyzed:
             if item.image_data is not None:
                 col_image, col_comment = st.columns([1, 2], gap="large")
