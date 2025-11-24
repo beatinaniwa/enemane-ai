@@ -1,7 +1,18 @@
 from pathlib import Path
 
+from PIL import Image
+
 from enemane_ai.analyzer import PRESET_PROMPT
-from enemane_ai.app import analyze_files
+from enemane_ai.app import (
+    AnalyzedGraph,
+    ResultRow,
+    analyze_files,
+    build_result_rows,
+    escape_markdown_cell,
+    export_table_csv,
+    parse_structured_comment,
+    render_table_markdown,
+)
 
 
 class DummyLLM:
@@ -31,3 +42,93 @@ def test_analyze_files_skips_comment_generation_for_csv(tmp_path: Path) -> None:
     assert result.text is not None
     assert "2024-01-01,8.5" in result.text
     assert result.comment == ""
+
+
+def test_analyze_files_extracts_titles_from_structured_llm(tmp_path: Path) -> None:
+    img_path = tmp_path / "plot.png"
+    Image.new("RGB", (10, 10), "white").save(img_path)
+
+    class StructuredLLM(DummyLLM):
+        def comment_on_graph(self, image, prompt):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            return (
+                '{"image_title": "レポートA",'
+                ' "item_name": "月次売上グラフ",'
+                ' "comment": "1) 増加傾向 2) 好調 3) 外れ値に注意"}'
+            )
+
+    llm = StructuredLLM()
+
+    results = analyze_files([img_path], prompt="prompt", llm=llm)
+
+    assert llm.calls == 1
+    result = results[0]
+    assert result.image_title == "レポートA"
+    assert result.item_name == "月次売上グラフ"
+    assert "増加傾向" in result.comment
+
+
+def test_parse_structured_comment_handles_code_fence() -> None:
+    raw = """```json
+{"image_title": "トップ", "item_name": "PV推移", "comment": "1) ..."}
+```"""
+
+    image_title, item_name, comment = parse_structured_comment(raw, fallback_label="fallback")
+
+    assert image_title == "トップ"
+    assert item_name == "PV推移"
+    assert "1)" in comment
+
+
+def test_build_result_rows_sets_item_name_and_default_comment() -> None:
+    analyzed = [
+        AnalyzedGraph(label="chart.png", comment="いい感じ", image_data=b"raw"),
+    ]
+
+    rows = build_result_rows(analyzed)
+
+    assert rows == [
+        ResultRow(image_title="chart.png", item_name="グラフ画像", comment="いい感じ"),
+    ]
+
+
+def test_build_result_rows_ignores_csv_entries() -> None:
+    analyzed = [
+        AnalyzedGraph(label="chart.png", comment="comment", image_data=b"raw"),
+        AnalyzedGraph(label="temperature.csv", comment="", text="csv rows"),
+    ]
+
+    rows = build_result_rows(analyzed)
+
+    assert len(rows) == 1
+    assert rows[0].image_title == "chart.png"
+
+
+def test_render_table_markdown_escapes_cells() -> None:
+    rows = [ResultRow(image_title="doc|1", item_name="グラフ画像", comment="**line1**\nline2")]
+
+    rendered = render_table_markdown(rows)
+
+    assert "doc\\|1" in rendered
+    assert "\\*\\*line1\\*\\*" in rendered
+    assert "<br>" in rendered
+    assert rendered.startswith("| 画像内タイトル | 項目名 | AIで生成したコメント |")
+    assert escape_markdown_cell("a|b") == "a\\|b"
+
+
+def test_export_table_csv_outputs_headers_and_rows() -> None:
+    rows = [
+        ResultRow(image_title="plot", item_name="グラフ画像", comment="トレンド良好"),
+        ResultRow(
+            image_title="temp.csv",
+            item_name="テキスト/CSV",
+            comment="CSV/テキストはコメント生成を省略しています。",
+        ),
+    ]
+
+    csv_bytes = export_table_csv(rows)
+
+    text = csv_bytes.decode("utf-8")
+    lines = text.strip().splitlines()
+    assert lines[0] == "画像内タイトル,項目名,AIで生成したコメント"
+    assert "plot,グラフ画像,トレンド良好" in lines[1]
