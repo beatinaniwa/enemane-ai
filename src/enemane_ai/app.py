@@ -14,7 +14,6 @@ from enemane_ai.analyzer import (
     GeminiGraphLanguageModel,
     GraphLanguageModel,
     analyze_image,
-    analyze_text,
     collect_graph_entries,
 )
 
@@ -59,9 +58,12 @@ def analyze_files(
             continue
 
         if entry.text is not None:
-            comment = analyze_text(entry.text, prompt=prompt, llm=llm)
             analyzed.append(
-                AnalyzedGraph(label=entry.display_label, comment=comment, text=entry.text)
+                AnalyzedGraph(
+                    label=entry.display_label,
+                    comment="",
+                    text=entry.text,
+                )
             )
     return analyzed
 
@@ -126,13 +128,16 @@ def main() -> None:
             if item.image_data is not None:
                 col_image, col_comment = st.columns([1, 2], gap="large")
                 with col_image:
-                    st.image(item.image_data, caption=item.label, use_container_width=True)
+                    st.image(item.image_data, caption=item.label, width="stretch")
                 with col_comment:
                     st.markdown(f"**{item.label}**")
                     st.markdown(item.comment)
             else:
                 st.markdown(f"**{item.label}**")
-                st.markdown(item.comment)
+                if item.text is not None:
+                    st.caption("CSV はコメントやデータ表示を省略しています。")
+                elif item.comment:
+                    st.markdown(item.comment)
 
 
 if __name__ == "__main__":
