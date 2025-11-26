@@ -17,6 +17,7 @@ from enemane_ai.analyzer import (
     GeminiGraphLanguageModel,
     GraphLanguageModel,
     analyze_image,
+    build_comparison_context,
     collect_graph_entries,
 )
 
@@ -54,27 +55,104 @@ def analyze_files(
     file_paths: list[Path],
     prompt: str,
     llm: GraphLanguageModel | None = None,
+    comparison_context: str | None = None,
 ) -> list[AnalyzedGraph]:
     entries = collect_graph_entries(file_paths)
     analyzed: list[AnalyzedGraph] = []
     for entry in entries:
         if entry.image is not None:
-            comment_prompt = build_image_prompt(prompt)
+            comment_prompt = build_image_prompt(prompt, comparison_context=comparison_context)
             raw_comment = analyze_image(entry.image, prompt=comment_prompt, llm=llm)
             image_title, item_name, comment = parse_structured_comment(
                 raw_comment, fallback_label=entry.display_label
             )
             buffer = BytesIO()
             entry.image.save(buffer, format="PNG")
-            analyzed.append(
-                AnalyzedGraph(
-                    label=entry.display_label,
-                    comment=comment,
-                    image_title=image_title,
-                    item_name=item_name,
-                    image_data=buffer.getvalue(),
+            image_bytes = buffer.getvalue()
+
+            # LLMが返したimage_titleのみで判定 (ファイル名では判定しない)
+            monthly_chart = _is_monthly_energy_chart(image_title)
+            power_usage_status = _is_power_usage_status_chart(image_title)
+
+            if power_usage_status:
+                # 「電力使用状況」のグラフ: 最大電力[kW]と電力使用量[kWh]の2つを生成
+                for item_info in [
+                    ("最大電力[kW]", "最大電力[kW](前年同月比較・ピーク値の推移)"),
+                    ("電力使用量[kWh]", "電力使用量[kWh](前年同月比較・消費量の推移)"),
+                ]:
+                    forced_item, focus_desc = item_info
+                    item_prompt = build_image_prompt(
+                        prompt,
+                        comparison_context=comparison_context,
+                        forced_item_name=forced_item,
+                        focus=focus_desc,
+                    )
+                    item_raw = analyze_image(entry.image, prompt=item_prompt, llm=llm)
+                    it_title, it_item, it_comment = parse_structured_comment(
+                        item_raw, fallback_label=image_title
+                    )
+                    analyzed.append(
+                        AnalyzedGraph(
+                            label=entry.display_label,
+                            comment=it_comment,
+                            image_title=it_title or image_title,
+                            item_name=forced_item,
+                            image_data=image_bytes,
+                        )
+                    )
+            elif monthly_chart:
+                # 「月間電力使用量」のグラフ: 前年比較と回路別内訳の2つを生成
+                # 前年比較: 専用プロンプトで前年同月との比較にフォーカス
+                yoy_prompt = build_image_prompt(
+                    prompt,
+                    comparison_context=comparison_context,
+                    forced_item_name="前年比較",
+                    focus="前年同月との電力使用量[kWh]の比較(増減率・要因分析)",
                 )
-            )
+                yoy_raw = analyze_image(entry.image, prompt=yoy_prompt, llm=llm)
+                yoy_title, yoy_item, yoy_comment = parse_structured_comment(
+                    yoy_raw, fallback_label=image_title
+                )
+                analyzed.append(
+                    AnalyzedGraph(
+                        label=entry.display_label,
+                        comment=yoy_comment,
+                        image_title=yoy_title or image_title,
+                        item_name="前年比較",
+                        image_data=image_bytes,
+                    )
+                )
+                # 回路別内訳: 上位回路の構成比にフォーカス (前年比較は上で行うのでここでは不要)
+                breakdown_prompt = build_image_prompt(
+                    prompt,
+                    comparison_context=comparison_context,
+                    forced_item_name="回路別内訳",
+                    focus="回路別内訳(上位回路のシェア・その他構成・カバー率のみ、前年比較は不要)",
+                )
+                breakdown_raw = analyze_image(entry.image, prompt=breakdown_prompt, llm=llm)
+                br_title, br_item, br_comment = parse_structured_comment(
+                    breakdown_raw, fallback_label=image_title
+                )
+                analyzed.append(
+                    AnalyzedGraph(
+                        label=entry.display_label,
+                        comment=br_comment,
+                        image_title=br_title or image_title,
+                        item_name="回路別内訳",
+                        image_data=image_bytes,
+                    )
+                )
+            else:
+                # 通常のグラフ
+                analyzed.append(
+                    AnalyzedGraph(
+                        label=entry.display_label,
+                        comment=comment,
+                        image_title=image_title,
+                        item_name=item_name,
+                        image_data=image_bytes,
+                    )
+                )
             continue
 
         if entry.text is not None:
@@ -132,25 +210,101 @@ def strip_markdown(text: str) -> str:
     return text.strip()
 
 
+def _extract_json_dict(text: str) -> dict | None:
+    decoder = json.JSONDecoder()
+    for candidate in (strip_code_fence(text), text):
+        for match in re.finditer(r"{", candidate):
+            try:
+                obj, _ = decoder.raw_decode(candidate, match.start())
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                return obj
+    return None
+
+
+def _strip_first_json_object(text: str) -> str:
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"{", text):
+        try:
+            _, end = decoder.raw_decode(text, match.start())
+        except json.JSONDecodeError:
+            continue
+        return (text[: match.start()] + text[end:]).strip()
+    return text.strip()
+
+
 def parse_structured_comment(raw_comment: str, fallback_label: str) -> tuple[str, str, str]:
+    data = _extract_json_dict(raw_comment)
+    image_title = fallback_label
+    item_name = fallback_label
+    if isinstance(data, dict):
+        image_title = str(data.get("image_title") or fallback_label)
+        item_name = str(data.get("item_name") or fallback_label)
+        comment_value = data.get("comment")
+        if comment_value:
+            return image_title, item_name, str(comment_value)
+
     cleaned = strip_code_fence(raw_comment)
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
-        return fallback_label, fallback_label, raw_comment
-
-    if not isinstance(data, dict):
-        return fallback_label, fallback_label, raw_comment
-
-    image_title = str(data.get("image_title") or fallback_label)
-    item_name = str(data.get("item_name") or fallback_label)
-    comment = str(data.get("comment") or raw_comment)
-    return image_title, item_name, comment
+    cleaned = _strip_first_json_object(cleaned)
+    return image_title, item_name, cleaned or fallback_label
 
 
-def build_image_prompt(base_prompt: str) -> str:
+TARGET_MONTHLY_ENERGY_TITLE = "電力使用量 [kWh] について <月間電力使用量>"
+MONTHLY_ENERGY_KEYWORDS = ["月間電力使用量"]
+POWER_USAGE_STATUS_KEYWORDS = ["電力使用状況"]
+
+
+def _is_monthly_energy_chart(title: str | None) -> bool:
+    """月間電力使用量グラフかどうかを判定する。
+
+    「月間電力使用量」というキーワードを含む場合にTrueを返す。
+    「電力使用状況」など他のグラフとは区別される。
+    """
+    if not title:
+        return False
+    return any(keyword in title for keyword in MONTHLY_ENERGY_KEYWORDS)
+
+
+def _is_power_usage_status_chart(title: str | None) -> bool:
+    """電力使用状況グラフかどうかを判定する。
+
+    「電力使用状況」というキーワードを含む場合にTrueを返す。
+    """
+    if not title:
+        return False
+    return any(keyword in title for keyword in POWER_USAGE_STATUS_KEYWORDS)
+
+
+def build_image_prompt(
+    base_prompt: str,
+    comparison_context: str | None = None,
+    forced_item_name: str | None = None,
+    focus: str | None = None,
+) -> str:
+    comparison_note = ""
+    if comparison_context:
+        comparison_note = f"\n\n【前年比較用データ】\n{comparison_context}"
+
+    special_notes = [
+        f"- 画像タイトルが「{TARGET_MONTHLY_ENERGY_TITLE}」の場合、"
+        "必ず前年同月との比較を含めてください。",
+        '- その場合、JSON 出力の "item_name" は必ず「前年比較」に設定してください。',
+        "- 前年データは「月報YYYYMM.csv」などのファイル名で渡されます。"
+        "YYYYMMから対象月と前年同月を推定して比較してください。",
+    ]
+    if forced_item_name:
+        special_notes.append(
+            f'- この出力では JSON の "item_name" を「{forced_item_name}」に固定してください。'
+        )
+    if focus:
+        special_notes.append(f"- コメントは{focus}の観点で簡潔にまとめてください。")
+
     return (
-        f"{base_prompt}\n\n"
+        f"{base_prompt}"
+        "\n\n【特記事項】\n"
+        f"{chr(10).join(special_notes)}\n"
+        f"{comparison_note}\n\n"
         "以下の3つの値を含む JSON 文字列だけを返してください。\n"
         '{ "image_title": "画像上部のタイトル", "item_name": "グラフ上の名称", "comment": "1) トレンド 2) 含意 3) 注意点" }\n'  # noqa: E501
         "日本語で簡潔に。"
@@ -187,7 +341,8 @@ def export_table_csv(rows: list[ResultRow]) -> bytes:
     writer.writerow(["画像内タイトル", "項目名", "AIで生成したコメント"])
     for row in rows:
         writer.writerow([row.image_title, row.item_name, row.comment])
-    return buffer.getvalue().encode("utf-8")
+    # Shift_JIS (CP932) でエンコード (Windows Excelで確実に開ける)
+    return buffer.getvalue().encode("cp932", errors="replace")
 
 
 def main() -> None:
@@ -214,6 +369,17 @@ def main() -> None:
     )
     st.caption("CSV は「日付,気温」の2列を想定しています (例: 2024-01-01,12.3)。")
 
+    comparison_files = st.file_uploader(
+        "前年比較用のデータをアップロードしてください (任意・CSV)",
+        type=["csv"],
+        accept_multiple_files=True,
+        key="comparison_files",
+    )
+    st.caption(
+        "前年同月などの比較用CSVを追加すると、コメント生成時に参照します。"
+        " 例: 月別電力量や最大電力の履歴。"
+    )
+
     if not uploaded_files:
         st.info("画像、PDF、または気温CSVファイルを選択してください。")
         return
@@ -227,9 +393,18 @@ def main() -> None:
             with TemporaryDirectory() as tmpdir_str:
                 tmpdir = Path(tmpdir_str)
                 stored_paths = save_uploads_to_temp(uploaded_files, tmpdir)
+                comparison_paths = save_uploads_to_temp(comparison_files or [], tmpdir)
                 status.update(label="分析中...", state="running")
                 try:
-                    analyzed = analyze_files(stored_paths, prompt=prompt, llm=llm)
+                    comparison_context = None
+                    if comparison_paths:
+                        comparison_context = build_comparison_context(comparison_paths)
+                    analyzed = analyze_files(
+                        stored_paths,
+                        prompt=prompt,
+                        llm=llm,
+                        comparison_context=comparison_context,
+                    )
                 except Exception as exc:
                     status.update(label="失敗", state="error")
                     st.error(f"ファイルの処理に失敗しました: {exc}")

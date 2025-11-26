@@ -173,3 +173,28 @@ def test_gemini_model_uses_env_key(monkeypatch: MonkeyPatch, tmp_path: Path) -> 
     text_comment = model.comment_on_text("raw csv content", PRESET_PROMPT)
     assert text_comment == "Gemini says hello"
     assert calls.contents == [PRESET_PROMPT, "raw csv content"]
+
+
+def test_build_comparison_context_uses_preview_rows(tmp_path: Path) -> None:
+    csv_path = tmp_path / "yoy.csv"
+    csv_path.write_text("month,value\n2023-01,100\n2023-02,90\n2024-01,120\n", encoding="utf-8")
+
+    context = analyzer.build_comparison_context([csv_path], max_rows=2)
+
+    assert context is not None
+    assert "yoy.csv" in context
+    assert "month,value" in context
+    assert "2023-01,100" in context
+    assert "2023-02,90" not in context  # max_rows=2 → ヘッダー+1行だけを採用
+
+
+def test_build_comparison_context_adds_report_month_hint(tmp_path: Path) -> None:
+    csv_path = tmp_path / "月報202410.csv"
+    csv_path.write_text("month,value\n2024-10,120\n", encoding="utf-8")
+
+    context = analyzer.build_comparison_context([csv_path], max_rows=2)
+
+    assert context is not None
+    assert "月報202410.csv" in context
+    assert "対象月: 2024-10" in context
+    assert "前年: 2023-10" in context
