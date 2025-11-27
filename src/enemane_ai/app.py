@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hmac
 import json
 import os
 import re
@@ -298,8 +299,39 @@ def analyze_graphs_with_context(
     return all_results
 
 
+def check_password() -> bool:
+    """Basic認証を行い、認証成功ならTrueを返す。"""
+
+    def password_entered() -> None:
+        """パスワード入力時のコールバック。"""
+        if hmac.compare_digest(
+            st.session_state["username"], st.secrets.auth.username
+        ) and hmac.compare_digest(st.session_state["password"], st.secrets.auth.password):
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]
+            del st.session_state["username"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if st.session_state.get("password_correct", False):
+        return True
+
+    st.text_input("ユーザー名", key="username")
+    st.text_input("パスワード", type="password", key="password")
+    st.button("ログイン", on_click=password_entered)
+
+    if "password_correct" in st.session_state and not st.session_state["password_correct"]:
+        st.error("ユーザー名またはパスワードが正しくありません")
+
+    return False
+
+
 def main() -> None:
     st.set_page_config(page_title="Graph Insight Uploader", layout="wide")
+
+    if not check_password():
+        return
+
     st.title("グラフ分析ダッシュボード")
     st.caption(
         "グラフ画像をアップロードし、月報CSV・気温データと組み合わせて" "AIコメントを生成します。"
