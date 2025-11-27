@@ -136,7 +136,7 @@ def test_export_table_csv_outputs_headers_and_rows() -> None:
 
     csv_bytes = export_table_csv(rows)
 
-    text = csv_bytes.decode("utf-8")
+    text = csv_bytes.decode("cp932")
     lines = text.strip().splitlines()
     assert lines[0] == "画像内タイトル,項目名,AIで生成したコメント"
     assert "plot,グラフ画像,トレンド良好" in lines[1]
