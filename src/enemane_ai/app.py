@@ -187,7 +187,8 @@ def export_table_csv(rows: list[ResultRow]) -> bytes:
     writer.writerow(["画像内タイトル", "項目名", "AIで生成したコメント"])
     for row in rows:
         writer.writerow([row.image_title, row.item_name, row.comment])
-    return buffer.getvalue().encode("utf-8")
+    # Shift_JIS (CP932) でエンコード (Windows Excelで確実に開ける)
+    return buffer.getvalue().encode("cp932", errors="replace")
 
 
 def main() -> None:
