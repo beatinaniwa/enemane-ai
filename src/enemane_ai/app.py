@@ -13,11 +13,17 @@ from typing import TYPE_CHECKING, Iterable
 import streamlit as st
 
 from enemane_ai.analyzer import (
+    OUTPUT_FORMAT_INSTRUCTION,
     PRESET_PROMPT,
     GeminiGraphLanguageModel,
     GraphLanguageModel,
+    MonthlyReportData,
+    MonthlyTemperatureSummary,
     analyze_image,
+    build_supplementary_context,
     collect_graph_entries,
+    parse_monthly_report_csv,
+    parse_temperature_csv_for_comparison,
 )
 
 if TYPE_CHECKING:
@@ -39,6 +45,15 @@ class ResultRow:
     image_title: str
     item_name: str
     comment: str
+
+
+@dataclass
+class OutputRow:
+    """target_data.csv形式の1行"""
+
+    graph_name: str  # 対応するグラフ名
+    item_name: str  # 項目名
+    ai_comment: str  # 生成するAIコメント
 
 
 def save_uploads_to_temp(files: Iterable["UploadedFile"], tmpdir: Path) -> list[Path]:
@@ -148,6 +163,47 @@ def parse_structured_comment(raw_comment: str, fallback_label: str) -> tuple[str
     return image_title, item_name, comment
 
 
+def parse_multi_item_response(
+    raw_response: str,
+    fallback_graph_name: str,
+) -> list[tuple[str, str, str]]:
+    """
+    JSON配列レスポンスを(graph_name, item_name, comment)のリストに変換。
+
+    レスポンスがJSON配列の場合は複数項目を返し、
+    単一オブジェクトまたはパースエラーの場合はフォールバック。
+    """
+    cleaned = strip_code_fence(raw_response)
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        # JSONパースに失敗した場合、単一項目として返す
+        return [(fallback_graph_name, "", raw_response)]
+
+    if isinstance(data, list):
+        results: list[tuple[str, str, str]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            graph_name = str(item.get("graph_name") or fallback_graph_name)
+            item_name = str(item.get("item_name") or "")
+            comment = str(item.get("comment") or "")
+            results.append((graph_name, item_name, comment))
+        if results:
+            return results
+        # 空の配列の場合はフォールバック
+        return [(fallback_graph_name, "", raw_response)]
+
+    if isinstance(data, dict):
+        # 単一オブジェクトの場合(後方互換性)
+        graph_name = str(data.get("graph_name") or data.get("image_title") or fallback_graph_name)
+        item_name = str(data.get("item_name") or "")
+        comment = str(data.get("comment") or "")
+        return [(graph_name, item_name, comment)]
+
+    return [(fallback_graph_name, "", raw_response)]
+
+
 def build_image_prompt(base_prompt: str) -> str:
     return (
         f"{base_prompt}\n\n"
@@ -190,32 +246,108 @@ def export_table_csv(rows: list[ResultRow]) -> bytes:
     return buffer.getvalue().encode("utf-8")
 
 
+def export_target_format_csv(results: list[OutputRow]) -> bytes:
+    """target_data.csv形式でエクスポート(BOM付きUTF-8)。"""
+    buffer = StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["対応するグラフ名", "項目名", "生成するAIコメント"])
+    for row in results:
+        writer.writerow([row.graph_name, row.item_name, row.ai_comment])
+    # BOM付きUTF-8でExcel互換性を確保
+    return ("\ufeff" + buffer.getvalue()).encode("utf-8")
+
+
+def analyze_graphs_with_context(
+    graph_paths: list[Path],
+    monthly_report: MonthlyReportData | None,
+    temperature: tuple[MonthlyTemperatureSummary, MonthlyTemperatureSummary] | None,
+    base_prompt: str,
+    llm: GraphLanguageModel,
+) -> list[OutputRow]:
+    """
+    グラフ画像を補助データのコンテキスト付きで分析し、OutputRowのリストを返す。
+    """
+    # 補助データコンテキストを構築
+    context = build_supplementary_context(monthly_report, temperature)
+
+    # プロンプトを構築
+    full_prompt = base_prompt
+    if context:
+        full_prompt = f"{base_prompt}\n\n{context}"
+    full_prompt = f"{full_prompt}\n\n{OUTPUT_FORMAT_INSTRUCTION}"
+
+    all_results: list[OutputRow] = []
+    entries = collect_graph_entries(graph_paths)
+
+    for entry in entries:
+        if entry.image is None:
+            continue
+
+        raw_response = analyze_image(entry.image, prompt=full_prompt, llm=llm)
+        items = parse_multi_item_response(raw_response, entry.display_label)
+
+        for graph_name, item_name, comment in items:
+            all_results.append(
+                OutputRow(
+                    graph_name=strip_markdown(graph_name),
+                    item_name=strip_markdown(item_name),
+                    ai_comment=strip_markdown(comment),
+                )
+            )
+
+    return all_results
+
+
 def main() -> None:
     st.set_page_config(page_title="Graph Insight Uploader", layout="wide")
-    st.title("グラフ/PDF/気温CSVの分析ダッシュボード")
+    st.title("グラフ分析ダッシュボード")
     st.caption(
-        "複数のグラフ画像やPDF、気温データのCSVをまとめてアップロードし、"
-        "あらかじめ決めたプロンプトで分析します。"
+        "グラフ画像をアップロードし、月報CSV・気温データと組み合わせて" "AIコメントを生成します。"
     )
 
-    st.caption("分析プロンプトは固定です。追加で伝えたいことがあれば下記に記入してください。")
-    additional_instructions = st.text_area(
-        "追加の指示 (任意)",
-        placeholder="例: 重要なトレンドのみを箇条書きでまとめてください。",
-        height=120,
+    # ファイルアップローダーを3つに分離
+    st.subheader("1. グラフ画像")
+    graph_files = st.file_uploader(
+        "分析したいグラフ画像をアップロードしてください",
+        type=["png", "jpg", "jpeg", "pdf"],
+        accept_multiple_files=True,
+        key="graph_images",
     )
+
+    st.subheader("2. 補助データ (オプション)")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        monthly_report_file = st.file_uploader(
+            "月報CSV (前年同月データ)",
+            type=["csv"],
+            accept_multiple_files=False,
+            key="monthly_report",
+            help="前年同月の電力使用量データ。前年比較に使用します。",
+        )
+
+    with col2:
+        temperature_file = st.file_uploader(
+            "気温データCSV (前年・当年)",
+            type=["csv"],
+            accept_multiple_files=False,
+            key="temperature",
+            help="前年と当年の気温データ。気温との相関分析に使用します。",
+        )
+
+    st.subheader("3. 追加指示 (オプション)")
+    additional_instructions = st.text_area(
+        "追加の指示",
+        placeholder="例: 重要なトレンドのみを箇条書きでまとめてください。",
+        height=80,
+    )
+
     prompt = PRESET_PROMPT
     if additional_instructions.strip():
         prompt = f"{PRESET_PROMPT}\n\n{additional_instructions.strip()}"
-    uploaded_files = st.file_uploader(
-        "分析したいファイルをまとめてアップロードしてください",
-        type=["png", "jpg", "jpeg", "bmp", "gif", "tiff", "pdf", "csv"],
-        accept_multiple_files=True,
-    )
-    st.caption("CSV は「日付,気温」の2列を想定しています (例: 2024-01-01,12.3)。")
 
-    if not uploaded_files:
-        st.info("画像、PDF、または気温CSVファイルを選択してください。")
+    if not graph_files:
+        st.info("グラフ画像を選択してください。")
         return
 
     if st.button("分析を実行", type="primary"):
@@ -226,57 +358,81 @@ def main() -> None:
         with st.status("ファイルを準備しています...", expanded=False) as status:
             with TemporaryDirectory() as tmpdir_str:
                 tmpdir = Path(tmpdir_str)
-                stored_paths = save_uploads_to_temp(uploaded_files, tmpdir)
+
+                # グラフ画像を保存
+                graph_paths = save_uploads_to_temp(graph_files, tmpdir)
+
+                # 月報CSVをパース
+                monthly_report: MonthlyReportData | None = None
+                if monthly_report_file:
+                    report_path = tmpdir / monthly_report_file.name
+                    report_path.write_bytes(monthly_report_file.getvalue())
+                    try:
+                        monthly_report = parse_monthly_report_csv(report_path)
+                        st.info(
+                            f"月報データ読み込み: {monthly_report.month_label}, "
+                            f"月間電力使用量: {monthly_report.total_power_monthly:,.0f} kWh"
+                        )
+                    except Exception as exc:
+                        st.warning(f"月報CSVの読み込みに失敗しました: {exc}")
+
+                # 気温データをパース
+                temperature: tuple[MonthlyTemperatureSummary, MonthlyTemperatureSummary] | None = (
+                    None
+                )
+                if temperature_file:
+                    temp_path = tmpdir / temperature_file.name
+                    temp_path.write_bytes(temperature_file.getvalue())
+                    try:
+                        temperature = parse_temperature_csv_for_comparison(temp_path)
+                        prev, curr = temperature
+                        st.info(
+                            f"気温データ読み込み: {prev.year_month} → {curr.year_month}, "
+                            f"平均気温差: {curr.avg_temp - prev.avg_temp:+.1f}℃"
+                        )
+                    except Exception as exc:
+                        st.warning(f"気温CSVの読み込みに失敗しました: {exc}")
+
                 status.update(label="分析中...", state="running")
                 try:
-                    analyzed = analyze_files(stored_paths, prompt=prompt, llm=llm)
+                    results = analyze_graphs_with_context(
+                        graph_paths=graph_paths,
+                        monthly_report=monthly_report,
+                        temperature=temperature,
+                        base_prompt=prompt,
+                        llm=llm,
+                    )
                 except Exception as exc:
                     status.update(label="失敗", state="error")
-                    st.error(f"ファイルの処理に失敗しました: {exc}")
+                    st.error(f"分析に失敗しました: {exc}")
                     return
             status.update(label="完了", state="complete")
 
         st.subheader("結果")
-        result_rows = build_result_rows(analyzed)
-        st.markdown("#### テーブル出力")
 
-        # st.table 用のデータを作成(テキストを全て表示するため)
+        if not results:
+            st.warning("分析結果がありません。")
+            return
+
+        # テーブル表示
+        st.markdown("#### テーブル出力")
         table_data = [
             {
-                "画像内タイトル": row.image_title,
+                "対応するグラフ名": row.graph_name,
                 "項目名": row.item_name,
-                "AIで生成したコメント": row.comment,
+                "生成するAIコメント": row.ai_comment,
             }
-            for row in result_rows
+            for row in results
         ]
         st.table(table_data)
 
+        # CSVダウンロード
         st.download_button(
             "CSVをダウンロード",
-            data=export_table_csv(result_rows),
+            data=export_target_format_csv(results),
             file_name="analysis_results.csv",
             mime="text/csv",
         )
-
-        for item in analyzed:
-            if item.image_data is not None:
-                col_image, col_comment = st.columns([1, 2], gap="large")
-                with col_image:
-                    st.image(
-                        item.image_data, caption=item.image_title or item.label, width="stretch"
-                    )
-                with col_comment:
-                    display_title = item.image_title or item.label
-                    st.markdown(f"**{display_title}**")
-                    if item.item_name:
-                        st.caption(f"項目名: {item.item_name}")
-                    st.markdown(item.comment)
-            else:
-                st.markdown(f"**{item.image_title or item.label}**")
-                if item.text is not None:
-                    st.caption("CSV はコメントやデータ表示を省略しています。")
-                elif item.comment:
-                    st.markdown(item.comment)
 
 
 if __name__ == "__main__":
