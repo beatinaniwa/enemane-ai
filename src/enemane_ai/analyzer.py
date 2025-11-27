@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import csv
 import os
-from dataclasses import dataclass
+import re
+from collections import defaultdict
+from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 from textwrap import dedent
@@ -17,6 +19,77 @@ DEFAULT_PRESET_PROMPT = (
     "あなたはグラフリテラシーに長けたアナリストです。"
     " 以下のフォーマットで簡潔にコメントを返してください:"
     " 1) トレンド 2) 読み取れる含意 3) 注意点。"
+)
+
+OUTPUT_FORMAT_INSTRUCTION = dedent(
+    """
+    以下のJSON配列形式で出力してください。
+
+    ```json
+    [
+      {"graph_name": "...", "item_name": "...", "comment": "..."},
+      {"graph_name": "...", "item_name": "...", "comment": "..."}
+    ]
+    ```
+
+    ■ グラフタイプ別の出力ルール【厳守】:
+
+    【T1+T2: 月別電力推移グラフ(折れ線+棒)】→ 必ず2つのオブジェクトを出力
+    ```json
+    [
+      {"graph_name": "直近1年間の電力使用状況", "item_name": "最大電力[kW]", "comment": "..."},
+      {"graph_name": "直近1年間の電力使用状況", "item_name": "電力使用量[kWh]", "comment": "..."}
+    ]
+    ```
+
+    【T3: 月間電力使用量の内訳(ドーナツ+表)】→ 必ず2つのオブジェクトを出力
+    ```json
+    [
+      {"graph_name": "月間電力使用量の内訳", "item_name": "回路別内訳",
+       "comment": "(当月の構成比のみ)"},
+      {"graph_name": "月間電力使用量の内訳", "item_name": "前年比較",
+       "comment": "(前年同月との差分)"}
+    ]
+    ```
+    ※「回路別内訳」には前年比較を含めない。「前年比較」は別オブジェクトとして出力。
+
+    【T4: 日別の回路別電力使用量】→ 1つのオブジェクトを出力
+    ```json
+    [
+      {"graph_name": "日別の回路別電力使用量...", "item_name": "", "comment": "..."}
+    ]
+    ```
+
+    【T5: 最大デマンド関連】→ 1〜2つのオブジェクトを出力
+    ```json
+    [
+      {"graph_name": "今月の最大電力内訳", "item_name": "最大デマンド発生時内訳", "comment": "..."}
+    ]
+    ```
+
+    ■ 各項目のコメント内容:
+
+    「回路別内訳」: 当月の回路別構成比を説明
+    - 例: 上位3回路「1F事務所SR_電灯」(22.6%)、「3F事務所_電灯」(22.2%)...で全体の57.9%
+    - 前年との比較は含めない
+
+    「前年比較」: 前年同月との差分・増減を説明
+    - 例: 計測回路合計は10,588kWhで前年同月比+468kWh(+4.1%)増加
+    - どの回路が増減したかを具体的に記載
+
+    ■ 気温データとの相関【重要】:
+    【気温データ】が提供されている場合は、必ず以下のように気温と電力消費の関係をコメントに含める:
+    - 最大電力[kW]: 気温が高い/低い日にピークが発生した可能性を言及
+    - 電力使用量[kWh]: 気温差(前年比○℃)による冷暖房負荷の増減を言及
+    - 前年比較: 気温差が電力使用量の増減に与えた影響を必ず記載
+      例: 「前年同月比で最高気温+3.6℃、平均気温+2.1℃となった気温差による冷房設備の
+           負荷増大が電力使用量増加の主要因である可能性があります」
+    - 日別推移: 特定日の気温と電力ピークの相関を言及
+
+    ■ 前年比較の計算:
+    - 【前年同月データ】の数値を使って前年比を計算
+    - 【気温データ】があれば気温差との相関を必ずコメントに含める
+    """
 )
 
 PRESET_PROMPT = dedent(
@@ -85,6 +158,212 @@ PRESET_PROMPT = dedent(
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tiff"}
 CSV_EXTENSIONS = {".csv"}
 DEFAULT_MODEL_NAME = "gemini-3-pro-preview"
+
+
+@dataclass
+class MonthlyReportData:
+    """前年同月の月報データ"""
+
+    month_label: str  # 例: "2023年10月"
+    max_power_daily: list[float] = field(default_factory=list)  # 日別最大電力[kW]
+    circuits: dict[str, list[float]] = field(default_factory=dict)  # 回路名 -> 日別値[kWh]
+    total_power_daily: list[float] = field(default_factory=list)  # 日別受電電力[kWh]
+
+    @property
+    def max_power_monthly(self) -> float:
+        """月間最大電力 = 日別最大値の最大"""
+        if not self.max_power_daily:
+            return 0.0
+        return max(self.max_power_daily)
+
+    @property
+    def total_power_monthly(self) -> float:
+        """月間電力使用量 = 日別合計のSUM"""
+        return sum(self.total_power_daily)
+
+    def circuit_monthly_total(self, circuit_name: str) -> float:
+        """回路別月間合計"""
+        return sum(self.circuits.get(circuit_name, []))
+
+
+@dataclass
+class MonthlyTemperatureSummary:
+    """月別気温サマリー"""
+
+    year_month: str  # 例: "2023-10", "2024-10"
+    max_temp: float  # 月間最高気温
+    min_temp: float  # 月間最低気温
+    avg_temp: float  # 月間平均気温
+
+
+def parse_monthly_report_csv(path: Path) -> MonthlyReportData:
+    """
+    月報CSVをパースして構造化データに変換。
+
+    CSVフォーマット:
+    - 行1: ヘッダー説明
+    - 行2: 日付列 (10/1(日), 10/2(月), ...)
+    - 行3: 最大電力[kW]
+    - 行4以降: 回路名と日別値
+    - 最終行: 受電電力
+    """
+    rows = _read_csv_rows(path)
+    if len(rows) < 3:
+        msg = f"月報CSV {path.name} のフォーマットが不正です(行数不足)"
+        raise ValueError(msg)
+
+    # ファイル名から年月を抽出 (例: 月報202310.csv -> 2023年10月)
+    match = re.search(r"(\d{4})(\d{2})", path.name)
+    if match:
+        year, month = match.groups()
+        month_label = f"{year}年{int(month)}月"
+    else:
+        month_label = "不明"
+
+    max_power_daily: list[float] = []
+    circuits: dict[str, list[float]] = defaultdict(list)
+    total_power_daily: list[float] = []
+
+    for row in rows[2:]:  # 行3以降をパース
+        if not row or not row[0].strip():
+            continue
+
+        row_name = row[0].strip()
+        values: list[float] = []
+        for cell in row[1:]:
+            try:
+                values.append(float(cell))
+            except ValueError:
+                continue
+
+        if not values:
+            continue
+
+        if row_name == "最大電力[kW]":
+            max_power_daily = values
+        elif row_name == "受電電力":
+            total_power_daily = values
+        else:
+            circuits[row_name] = values
+
+    return MonthlyReportData(
+        month_label=month_label,
+        max_power_daily=max_power_daily,
+        circuits=dict(circuits),
+        total_power_daily=total_power_daily,
+    )
+
+
+def parse_temperature_csv_for_comparison(
+    path: Path,
+) -> tuple[MonthlyTemperatureSummary, MonthlyTemperatureSummary]:
+    """
+    気温CSVをパースして前年・当年の月別サマリーを返す。
+
+    CSVフォーマット:
+    - 時間別データ (年月日時刻, 気温, ...)
+    - 前年と当年のデータが含まれる
+    """
+    rows = _read_csv_rows(path)
+
+    # 年月ごとに気温を集計
+    temps_by_year_month: dict[str, list[float]] = defaultdict(list)
+
+    for row in rows:
+        if len(row) < 2:
+            continue
+
+        date_str = row[0].strip()
+        # 日付パターンを検出 (2023/10/1 or 2023-10-01)
+        date_match = re.match(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", date_str)
+        if not date_match:
+            continue
+
+        year, month, _ = date_match.groups()
+        year_month = f"{year}-{int(month):02d}"
+
+        try:
+            temp = float(row[1])
+            temps_by_year_month[year_month].append(temp)
+        except ValueError:
+            continue
+
+    if len(temps_by_year_month) < 2:
+        msg = f"気温CSV {path.name} に前年・当年のデータが見つかりません"
+        raise ValueError(msg)
+
+    # 年月でソートして前年・当年を特定
+    sorted_months = sorted(temps_by_year_month.keys())
+    prev_year_month = sorted_months[0]
+    curr_year_month = sorted_months[-1]
+
+    prev_temps = temps_by_year_month[prev_year_month]
+    curr_temps = temps_by_year_month[curr_year_month]
+
+    prev_summary = MonthlyTemperatureSummary(
+        year_month=prev_year_month,
+        max_temp=max(prev_temps),
+        min_temp=min(prev_temps),
+        avg_temp=sum(prev_temps) / len(prev_temps),
+    )
+
+    curr_summary = MonthlyTemperatureSummary(
+        year_month=curr_year_month,
+        max_temp=max(curr_temps),
+        min_temp=min(curr_temps),
+        avg_temp=sum(curr_temps) / len(curr_temps),
+    )
+
+    return prev_summary, curr_summary
+
+
+def build_supplementary_context(
+    monthly_report: MonthlyReportData | None,
+    temperature: tuple[MonthlyTemperatureSummary, MonthlyTemperatureSummary] | None,
+) -> str:
+    """月報・気温データをプロンプト用のコンテキスト文字列に変換。"""
+    parts: list[str] = []
+
+    if monthly_report:
+        parts.append(f"【前年同月データ({monthly_report.month_label})】")
+        parts.append(f"- 月間最大電力: {monthly_report.max_power_monthly:.1f} kW")
+        parts.append(f"- 月間電力使用量: {monthly_report.total_power_monthly:,.0f} kWh")
+
+        if monthly_report.circuits:
+            parts.append("- 回路別内訳:")
+            # 電力使用量の多い順にソート
+            sorted_circuits = sorted(
+                monthly_report.circuits.items(),
+                key=lambda x: sum(x[1]),
+                reverse=True,
+            )
+            for circuit_name, daily_values in sorted_circuits[:10]:  # 上位10回路
+                total = sum(daily_values)
+                parts.append(f"  - {circuit_name}: {total:,.0f} kWh")
+
+    if temperature:
+        prev, curr = temperature
+        parts.append("")
+        parts.append("【気温データ】")
+
+        # 年月を読みやすい形式に変換
+        prev_label = prev.year_month.replace("-", "年") + "月"
+        curr_label = curr.year_month.replace("-", "年") + "月"
+
+        parts.append(
+            f"- {prev_label}: 最高{prev.max_temp:.1f}℃, "
+            f"最低{prev.min_temp:.1f}℃, 平均{prev.avg_temp:.1f}℃"
+        )
+
+        max_diff = curr.max_temp - prev.max_temp
+        avg_diff = curr.avg_temp - prev.avg_temp
+        parts.append(
+            f"- {curr_label}: 最高{curr.max_temp:.1f}℃, "
+            f"最低{curr.min_temp:.1f}℃, 平均{curr.avg_temp:.1f}℃ "
+            f"(前年比 最高{max_diff:+.1f}℃, 平均{avg_diff:+.1f}℃)"
+        )
+
+    return "\n".join(parts)
 
 
 @dataclass

@@ -5,10 +5,13 @@ from PIL import Image
 from enemane_ai.analyzer import PRESET_PROMPT
 from enemane_ai.app import (
     AnalyzedGraph,
+    OutputRow,
     ResultRow,
     analyze_files,
     build_result_rows,
     export_table_csv,
+    export_target_format_csv,
+    parse_multi_item_response,
     parse_structured_comment,
 )
 
@@ -140,3 +143,66 @@ def test_export_table_csv_outputs_headers_and_rows() -> None:
     lines = text.strip().splitlines()
     assert lines[0] == "画像内タイトル,項目名,AIで生成したコメント"
     assert "plot,グラフ画像,トレンド良好" in lines[1]
+
+
+def test_parse_multi_item_response_handles_json_array() -> None:
+    raw = """```json
+[
+  {"graph_name": "電力使用状況", "item_name": "最大電力[kW]", "comment": "コメント1"},
+  {"graph_name": "電力使用状況", "item_name": "電力使用量[kWh]", "comment": "コメント2"}
+]
+```"""
+
+    results = parse_multi_item_response(raw, fallback_graph_name="fallback")
+
+    assert len(results) == 2
+    assert results[0] == ("電力使用状況", "最大電力[kW]", "コメント1")
+    assert results[1] == ("電力使用状況", "電力使用量[kWh]", "コメント2")
+
+
+def test_parse_multi_item_response_handles_single_object() -> None:
+    raw = '{"graph_name": "グラフA", "item_name": "項目X", "comment": "テストコメント"}'
+
+    results = parse_multi_item_response(raw, fallback_graph_name="fallback")
+
+    assert len(results) == 1
+    assert results[0] == ("グラフA", "項目X", "テストコメント")
+
+
+def test_parse_multi_item_response_falls_back_on_invalid_json() -> None:
+    raw = "This is not JSON"
+
+    results = parse_multi_item_response(raw, fallback_graph_name="fallback.png")
+
+    assert len(results) == 1
+    assert results[0][0] == "fallback.png"
+    assert results[0][1] == ""
+    assert "This is not JSON" in results[0][2]
+
+
+def test_parse_multi_item_response_uses_fallback_for_missing_graph_name() -> None:
+    raw = '[{"item_name": "項目A", "comment": "コメント"}]'
+
+    results = parse_multi_item_response(raw, fallback_graph_name="default.png")
+
+    assert len(results) == 1
+    assert results[0][0] == "default.png"
+    assert results[0][1] == "項目A"
+
+
+def test_export_target_format_csv_has_bom_and_correct_headers() -> None:
+    rows = [
+        OutputRow(graph_name="グラフ1", item_name="最大電力[kW]", ai_comment="コメント1"),
+        OutputRow(graph_name="グラフ1", item_name="電力使用量[kWh]", ai_comment="コメント2"),
+    ]
+
+    csv_bytes = export_target_format_csv(rows)
+
+    # BOM付きUTF-8を確認
+    assert csv_bytes.startswith(b"\xef\xbb\xbf")
+
+    text = csv_bytes.decode("utf-8-sig")
+    lines = text.strip().splitlines()
+    assert lines[0] == "対応するグラフ名,項目名,生成するAIコメント"
+    assert "グラフ1,最大電力[kW],コメント1" in lines[1]
+    assert "グラフ1,電力使用量[kWh],コメント2" in lines[2]

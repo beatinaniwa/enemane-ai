@@ -6,7 +6,17 @@ from pypdf import PdfWriter
 from pytest import MonkeyPatch
 
 from enemane_ai import analyzer
-from enemane_ai.analyzer import PRESET_PROMPT, analyze_image, analyze_text, collect_graph_entries
+from enemane_ai.analyzer import (
+    PRESET_PROMPT,
+    MonthlyReportData,
+    MonthlyTemperatureSummary,
+    analyze_image,
+    analyze_text,
+    build_supplementary_context,
+    collect_graph_entries,
+    parse_monthly_report_csv,
+    parse_temperature_csv_for_comparison,
+)
 
 
 class DummyLLM:
@@ -173,3 +183,79 @@ def test_gemini_model_uses_env_key(monkeypatch: MonkeyPatch, tmp_path: Path) -> 
     text_comment = model.comment_on_text("raw csv content", PRESET_PROMPT)
     assert text_comment == "Gemini says hello"
     assert calls.contents == [PRESET_PROMPT, "raw csv content"]
+
+
+def test_parse_monthly_report_csv(tmp_path: Path) -> None:
+    csv_path = tmp_path / "月報202310.csv"
+    csv_path.write_text(
+        "(1) 参照元「月間エネルギー使用実績と最大電力の推移」,,,\n"
+        ",10/1(日),10/2(月),10/3(火)\n"
+        "最大電力[kW],27.52,35.14,34.18\n"
+        "1F事務所SR_電灯,100.47,97,99.53\n"
+        "受電電力,330.95,465.97,458.73\n",
+        encoding="utf-8",
+    )
+
+    report = parse_monthly_report_csv(csv_path)
+
+    assert report.month_label == "2023年10月"
+    assert report.max_power_daily == [27.52, 35.14, 34.18]
+    assert report.max_power_monthly == 35.14
+    assert report.total_power_daily == [330.95, 465.97, 458.73]
+    assert report.total_power_monthly == 1255.65
+    assert "1F事務所SR_電灯" in report.circuits
+    assert report.circuits["1F事務所SR_電灯"] == [100.47, 97, 99.53]
+
+
+def test_parse_temperature_csv_for_comparison(tmp_path: Path) -> None:
+    csv_path = tmp_path / "temp.csv"
+    csv_path.write_text(
+        "年月日時,気温(℃),品質\n"
+        "2023/10/1 1:00:00,22.9,8\n"
+        "2023/10/1 2:00:00,20.0,8\n"
+        "2024/10/1 1:00:00,25.0,8\n"
+        "2024/10/1 2:00:00,23.0,8\n",
+        encoding="utf-8",
+    )
+
+    prev, curr = parse_temperature_csv_for_comparison(csv_path)
+
+    assert prev.year_month == "2023-10"
+    assert prev.max_temp == 22.9
+    assert prev.min_temp == 20.0
+    assert prev.avg_temp == 21.45
+
+    assert curr.year_month == "2024-10"
+    assert curr.max_temp == 25.0
+    assert curr.min_temp == 23.0
+    assert curr.avg_temp == 24.0
+
+
+def test_build_supplementary_context_with_data() -> None:
+    report = MonthlyReportData(
+        month_label="2023年10月",
+        max_power_daily=[30.0, 35.0, 32.0],
+        circuits={"1F電灯": [100.0, 110.0, 105.0], "2F電灯": [50.0, 55.0, 52.0]},
+        total_power_daily=[300.0, 350.0, 320.0],
+    )
+    prev = MonthlyTemperatureSummary(
+        year_month="2023-10", max_temp=27.0, min_temp=10.0, avg_temp=18.0
+    )
+    curr = MonthlyTemperatureSummary(
+        year_month="2024-10", max_temp=30.0, min_temp=12.0, avg_temp=20.0
+    )
+
+    context = build_supplementary_context(report, (prev, curr))
+
+    assert "2023年10月" in context
+    assert "35.0 kW" in context
+    assert "970 kWh" in context
+    assert "1F電灯" in context
+    assert "2024年10月" in context
+    assert "+3.0℃" in context
+    assert "+2.0℃" in context
+
+
+def test_build_supplementary_context_with_none() -> None:
+    context = build_supplementary_context(None, None)
+    assert context == ""
