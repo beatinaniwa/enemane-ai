@@ -292,10 +292,32 @@ def parse_temperature_csv_for_comparison(
         msg = f"気温CSV {path.name} に前年・当年のデータが見つかりません"
         raise ValueError(msg)
 
-    # 年月でソートして前年・当年を特定
-    sorted_months = sorted(temps_by_year_month.keys())
-    prev_year_month = sorted_months[0]
-    curr_year_month = sorted_months[-1]
+    # 同じ月で前年・当年を比較
+    # データ件数が最も多い年月をメインとし、その1年前/後を探す
+    sorted_by_count = sorted(
+        temps_by_year_month.keys(),
+        key=lambda ym: len(temps_by_year_month[ym]),
+        reverse=True,
+    )
+
+    # 最もデータが多い月を基準にする
+    main_month = sorted_by_count[0]
+    main_year, main_mm = main_month.split("-")
+    main_year_int = int(main_year)
+
+    # 同じ月の前年・当年を探す
+    prev_year_month = f"{main_year_int - 1}-{main_mm}"
+    curr_year_month = f"{main_year_int}-{main_mm}"
+
+    # 前年データがない場合は逆(当年がメインで翌年を探す)
+    if prev_year_month not in temps_by_year_month:
+        next_year_month = f"{main_year_int + 1}-{main_mm}"
+        if next_year_month in temps_by_year_month:
+            prev_year_month = main_month
+            curr_year_month = next_year_month
+        else:
+            msg = f"気温CSV {path.name} に同じ月の前年・当年データが見つかりません"
+            raise ValueError(msg)
 
     prev_temps = temps_by_year_month[prev_year_month]
     curr_temps = temps_by_year_month[curr_year_month]

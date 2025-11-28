@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from google.genai import types as genai_types
 from PIL import Image, ImageDraw
 from pypdf import PdfWriter
@@ -229,6 +230,48 @@ def test_parse_temperature_csv_for_comparison(tmp_path: Path) -> None:
     assert curr.max_temp == 25.0
     assert curr.min_temp == 23.0
     assert curr.avg_temp == 24.0
+
+
+def test_parse_temperature_csv_for_comparison_with_next_month_data(
+    tmp_path: Path,
+) -> None:
+    """月末翌日のデータ(1件)が含まれる場合でも同じ月を正しく比較する."""
+    csv_path = tmp_path / "temp.csv"
+    csv_path.write_text(
+        "年月日時,気温(℃),品質\n"
+        "2023/10/1 1:00:00,22.9,8\n"
+        "2023/10/1 2:00:00,20.0,8\n"
+        "2023/11/1 0:00:00,14.2,8\n"  # 月末翌日データ(1件)
+        "2024/10/1 1:00:00,25.0,8\n"
+        "2024/10/1 2:00:00,23.0,8\n"
+        "2024/11/1 0:00:00,13.1,8\n",  # 月末翌日データ(1件)
+        encoding="utf-8",
+    )
+
+    prev, curr = parse_temperature_csv_for_comparison(csv_path)
+
+    # 同じ月(10月)を比較すること
+    assert prev.year_month == "2023-10"
+    assert curr.year_month == "2024-10"
+    # 11月の1件データは無視される
+    assert prev.max_temp == 22.9
+    assert curr.max_temp == 25.0
+
+
+def test_parse_temperature_csv_for_comparison_no_matching_month(
+    tmp_path: Path,
+) -> None:
+    """同じ月の前年・当年データがない場合はエラー."""
+    csv_path = tmp_path / "temp.csv"
+    csv_path.write_text(
+        "年月日時,気温(℃),品質\n"
+        "2023/10/1 1:00:00,22.9,8\n"
+        "2024/11/1 1:00:00,25.0,8\n",  # 異なる月
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="同じ月の前年・当年データが見つかりません"):
+        parse_temperature_csv_for_comparison(csv_path)
 
 
 def test_build_supplementary_context_with_data() -> None:
