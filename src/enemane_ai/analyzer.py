@@ -11,6 +11,9 @@ from textwrap import dedent
 from typing import Iterable, Protocol, Sequence, cast
 
 import pypdfium2 as pdfium
+import requests
+from bs4 import BeautifulSoup
+from ddgs import DDGS
 from google import genai
 from google.genai import types as genai_types
 from PIL import Image
@@ -773,3 +776,240 @@ def build_power_calendar_context(data: MonthlyPowerCalendarData) -> str:
         )
 
     return "\n".join(parts)
+
+
+# =============================================================================
+# 記事検索・要約機能
+# =============================================================================
+
+
+@dataclass
+class ArticleFetchResult:
+    """ページ取得結果"""
+
+    title: str
+    content: str
+    og_image: str
+    link: str
+    og_type: str  # "article", "website" など
+
+
+ARTICLE_SUMMARIZATION_PROMPT = dedent(
+    """
+    あなたは記事要約の専門家です。
+    以下の記事本文を読み、簡潔に要約してください。
+
+    ■ ルール
+    - 2〜4文で要約する
+    - 重要なポイントを抽出する
+    - 専門用語はそのまま残す
+    - 読者が記事を読むかどうか判断できる情報を含める
+
+    ■ 出力形式
+    要約文のみを出力(JSON不要)
+    """
+)
+
+
+def is_likely_article_url(url: str) -> bool:
+    """
+    URLパターンから記事ページの可能性を判定する。
+
+    Args:
+        url: 判定対象のURL
+
+    Returns:
+        bool: 記事ページの可能性が高い場合True
+    """
+    # 優先パターン (記事ページ) - 先にチェック
+    article_patterns = [
+        r"/article/",
+        r"/column/",
+        r"/blog/",
+        r"/news/",
+        r"/post/",
+        r"/entry/",
+        r"/\d{4}/\d{2}/",  # 日付パターン (例: /2024/01/)
+    ]
+
+    # 優先パターンに一致したら True (除外パターンより優先)
+    for pattern in article_patterns:
+        if re.search(pattern, url):
+            return True
+
+    # 除外パターン (トップページ、カテゴリページなど)
+    exclude_patterns = [
+        r"^https?://[^/]+/?$",  # トップページのみ (ドメイン直下)
+        r"/category/",  # カテゴリページ
+        r"/tag/",  # タグページ
+        r"/archive/",  # アーカイブページ
+        r"/search",  # 検索結果
+        r"/page/\d+",  # ページネーション
+        r"/author/",  # 著者一覧
+    ]
+
+    # 除外パターンに一致したら False
+    for pattern in exclude_patterns:
+        if re.search(pattern, url):
+            return False
+
+    # どちらにも該当しない場合は True (フィルタしすぎを防ぐ)
+    return True
+
+
+def fetch_page_content(url: str, timeout: int = 10) -> ArticleFetchResult:
+    """
+    URLからページ本文とog:imageを取得する。
+
+    Args:
+        url: 取得対象のURL
+        timeout: タイムアウト秒数
+
+    Returns:
+        ArticleFetchResult: 取得結果
+
+    Raises:
+        requests.RequestException: ページ取得に失敗した場合
+    """
+    # 一般的なブラウザのUser-Agentを使用 (ボットブロック回避)
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    }
+
+    response = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+    response.raise_for_status()
+
+    # エンコーディング処理
+    response.encoding = response.apparent_encoding or "utf-8"
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    # タイトル取得
+    title = ""
+    title_tag = soup.find("title")
+    if title_tag:
+        title = title_tag.get_text(strip=True)
+
+    # og:image取得 (property属性とname属性の両方を試行)
+    og_image = ""
+    og_image_tag = soup.find("meta", property="og:image")
+    if not og_image_tag:
+        og_image_tag = soup.find("meta", attrs={"name": "og:image"})
+    if not og_image_tag:
+        # Twitter Cardのimage
+        og_image_tag = soup.find("meta", attrs={"name": "twitter:image"})
+    if og_image_tag and hasattr(og_image_tag, "get"):
+        img_content = og_image_tag.get("content")
+        if img_content:
+            og_image = str(img_content)
+
+    # og:type取得 (記事判定に使用)
+    og_type = ""
+    og_type_tag = soup.find("meta", property="og:type")
+    if og_type_tag and hasattr(og_type_tag, "get"):
+        type_content = og_type_tag.get("content")
+        if type_content:
+            og_type = str(type_content)
+
+    # 本文取得 (複数の方法を試行)
+    content = ""
+
+    # 方法1: article タグ
+    article = soup.find("article")
+    if article:
+        content = article.get_text(separator="\n", strip=True)
+
+    # 方法2: main タグ
+    if not content:
+        main = soup.find("main")
+        if main:
+            content = main.get_text(separator="\n", strip=True)
+
+    # 方法3: body全体からscript/styleを除去
+    if not content:
+        body = soup.find("body")
+        if body and hasattr(body, "find_all"):
+            for tag in body.find_all(["script", "style", "nav", "footer", "header"]):
+                tag.decompose()
+            content = body.get_text(separator="\n", strip=True)
+
+    # 長すぎる場合は切り詰め (Geminiの入力制限を考慮)
+    max_content_length = 10000
+    if len(content) > max_content_length:
+        content = content[:max_content_length] + "..."
+
+    return ArticleFetchResult(
+        title=title,
+        content=content,
+        og_image=og_image,
+        link=url,
+        og_type=og_type,
+    )
+
+
+def summarize_article(content: str, llm: GraphLanguageModel) -> str:
+    """
+    記事本文をGeminiで要約する。
+
+    Args:
+        content: 記事本文
+        llm: Geminiクライアント
+
+    Returns:
+        str: 要約文
+    """
+    prompt = f"{ARTICLE_SUMMARIZATION_PROMPT}\n\n【記事本文】\n{content}"
+    return llm.comment_on_text(content, prompt)
+
+
+@dataclass
+class DuckDuckGoSearchResult:
+    """DuckDuckGo検索結果"""
+
+    title: str
+    url: str
+    body: str  # スニペット
+
+
+def search_with_duckduckgo(
+    theme: str,
+    target: str | None = None,
+    max_results: int = 10,
+) -> list[DuckDuckGoSearchResult]:
+    """
+    DuckDuckGoで記事を検索する。
+
+    Args:
+        theme: 検索テーマ
+        target: 送付先の属性 (検索キーワードに追加)
+        max_results: 最大取得件数
+
+    Returns:
+        list[DuckDuckGoSearchResult]: 検索結果のリスト
+    """
+    # 検索クエリ構築
+    query = f"{theme} コラム 記事"
+    if target and target.strip():
+        query = f"{target} {query}"
+
+    ddgs = DDGS()
+    results = ddgs.text(
+        query,
+        region="jp-jp",
+        max_results=max_results,
+    )
+
+    return [
+        DuckDuckGoSearchResult(
+            title=r.get("title", ""),
+            url=r.get("href", ""),
+            body=r.get("body", ""),
+        )
+        for r in results
+    ]

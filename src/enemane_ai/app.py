@@ -26,10 +26,14 @@ from enemane_ai.analyzer import (
     build_power_calendar_context,
     build_supplementary_context,
     collect_graph_entries,
+    fetch_page_content,
+    is_likely_article_url,
     parse_monthly_report_csv,
     parse_power_30min_csv,
     parse_temperature_csv_for_comparison,
     pdf_to_images,
+    search_with_duckduckgo,
+    summarize_article,
 )
 
 if TYPE_CHECKING:
@@ -68,6 +72,17 @@ class CalendarAnalysisRow:
 
     item: str  # 項目名(全体傾向、最大需要日の確認など)
     analysis: str  # 事実+仮説
+
+
+@dataclass
+class ArticleOutputRow:
+    """記事検索結果CSVの1行"""
+
+    theme: str  # テーマ
+    title: str  # タイトル
+    content: str  # 本文(要約)
+    image: str  # 画像URL
+    link: str  # リンク
 
 
 def save_uploads_to_temp(files: Iterable["UploadedFile"], tmpdir: Path) -> list[Path]:
@@ -270,6 +285,16 @@ def export_calendar_analysis_csv(rows: list[CalendarAnalysisRow]) -> bytes:
     writer.writerow(["項目", "事実+仮説"])
     for row in rows:
         writer.writerow([row.item, row.analysis])
+    return ("\ufeff" + buffer.getvalue()).encode("utf-8")
+
+
+def export_article_search_csv(rows: list[ArticleOutputRow]) -> bytes:
+    """記事検索結果をCSVエクスポート(BOM付きUTF-8)。"""
+    buffer = StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["テーマ", "タイトル", "本文", "画像", "リンク"])
+    for row in rows:
+        writer.writerow([row.theme, row.title, row.content, row.image, row.link])
     return ("\ufeff" + buffer.getvalue()).encode("utf-8")
 
 
@@ -682,6 +707,143 @@ def render_calendar_analysis_tab() -> None:
         )
 
 
+def render_article_search_tab() -> None:
+    """記事検索・要約タブのUIを描画。"""
+    st.caption("テーマを入力し、関連記事を検索してAIで要約します。")
+
+    st.subheader("1. テーマ入力")
+    theme = st.text_input(
+        "検索したいテーマを入力してください",
+        placeholder="例: 省エネ対策 オフィス 電力削減",
+        key="article_theme",
+    )
+
+    st.subheader("2. 送付先の建物タイプ (オプション)")
+    st.caption("建物タイプを選択すると、より関連性の高い記事を検索します")
+    building_types = st.multiselect(
+        "建物タイプを選択",
+        options=["オフィス", "自治体施設", "工場", "介護福祉施設"],
+        default=[],
+        key="article_building_types",
+    )
+    target_context = ", ".join(building_types) if building_types else ""
+
+    st.subheader("3. 検索設定 (オプション)")
+    timeout = st.slider(
+        "ページ取得タイムアウト(秒)",
+        min_value=5,
+        max_value=30,
+        value=10,
+        key="article_timeout",
+    )
+
+    if not theme:
+        st.info("テーマを入力してください。")
+        return
+
+    if st.button("検索・要約を実行", type="primary", key="article_search_button"):
+        llm = resolve_gemini_client()
+        if llm is None:
+            return
+
+        with st.status("処理中...", expanded=True) as status:
+            # Step 1: DuckDuckGoで検索
+            status.update(label="Web検索中...", state="running")
+            try:
+                search_results = search_with_duckduckgo(
+                    theme, target=target_context, max_results=10
+                )
+                st.info(f"{len(search_results)}件の検索結果を取得しました")
+            except Exception as exc:
+                status.update(label="失敗", state="error")
+                st.error(f"検索に失敗しました: {exc}")
+                return
+
+            if not search_results:
+                status.update(label="完了", state="complete")
+                st.warning("検索結果が見つかりませんでした。")
+                return
+
+            # Step 2: URLパターンフィルタリング
+            filtered_results = [item for item in search_results if is_likely_article_url(item.url)]
+            if len(filtered_results) < len(search_results):
+                st.info(f"URLフィルタリング: {len(search_results)}件 → {len(filtered_results)}件")
+
+            if not filtered_results:
+                status.update(label="完了", state="complete")
+                st.warning("記事ページが見つかりませんでした。")
+                return
+
+            # Step 3: 各ページを取得・要約
+            status.update(label="記事を取得・要約中...", state="running")
+            results: list[ArticleOutputRow] = []
+            progress_bar = st.progress(0)
+            min_content_length = 300  # 最小コンテンツ長
+
+            for i, item in enumerate(filtered_results):
+                try:
+                    # ページ取得
+                    fetch_result = fetch_page_content(item.url, timeout)
+
+                    # コンテンツ長チェック
+                    if len(fetch_result.content) < min_content_length:
+                        st.warning(f"コンテンツが短いためスキップ: {item.url}")
+                        progress_bar.progress((i + 1) / len(filtered_results))
+                        continue
+
+                    # 要約生成
+                    if fetch_result.content:
+                        summary = summarize_article(fetch_result.content, llm)
+                    else:
+                        summary = item.body or "本文を取得できませんでした"
+
+                    results.append(
+                        ArticleOutputRow(
+                            theme=theme,
+                            title=fetch_result.title or item.title,
+                            content=summary,
+                            image=fetch_result.og_image,
+                            link=item.url,
+                        )
+                    )
+                except Exception as exc:
+                    st.warning(f"記事取得エラー ({item.url}): {exc}")
+
+                progress_bar.progress((i + 1) / len(filtered_results))
+
+            status.update(label="完了", state="complete")
+
+        # 結果表示
+        st.subheader("結果")
+
+        if not results:
+            st.warning("検索結果がありません。")
+            return
+
+        # テーブル表示
+        st.markdown("#### テーブル出力")
+        table_data = [
+            {
+                "テーマ": row.theme,
+                "タイトル": row.title,
+                "本文": row.content[:100] + "..." if len(row.content) > 100 else row.content,
+                "画像": "あり" if row.image else "なし",
+                "リンク": row.link,
+            }
+            for row in results
+        ]
+        st.table(table_data)
+
+        # CSVダウンロード
+        st.download_button(
+            "CSVをダウンロード",
+            data=export_article_search_csv(results),
+            file_name="article_search_results.csv",
+            mime="text/csv",
+            key="article_download_button",
+        )
+
+
 def main() -> None:
     st.set_page_config(page_title="Graph Insight Uploader", layout="wide")
 
@@ -690,14 +852,17 @@ def main() -> None:
 
     st.title("グラフ分析ダッシュボード")
 
-    # タブで機能を分離
-    tab1, tab2 = st.tabs(["グラフ分析", "電力カレンダー分析"])
+    # タブで機能を分離 (3つに拡張)
+    tab1, tab2, tab3 = st.tabs(["グラフ分析", "電力カレンダー分析", "記事検索・要約"])
 
     with tab1:
         render_graph_analysis_tab()
 
     with tab2:
         render_calendar_analysis_tab()
+
+    with tab3:
+        render_article_search_tab()
 
 
 if __name__ == "__main__":
