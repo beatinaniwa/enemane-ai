@@ -730,15 +730,6 @@ def render_article_search_tab() -> None:
     )
     target_context = ", ".join(building_types) if building_types else ""
 
-    st.subheader("3. 検索設定 (オプション)")
-    timeout = st.slider(
-        "ページ取得タイムアウト(秒)",
-        min_value=5,
-        max_value=30,
-        value=10,
-        key="article_timeout",
-    )
-
     if st.button("検索・要約を実行", type="primary", key="article_search_button"):
         llm = resolve_gemini_client()
         if llm is None:
@@ -781,7 +772,7 @@ def render_article_search_tab() -> None:
             for i, item in enumerate(filtered_results):
                 try:
                     # ページ取得
-                    fetch_result = fetch_page_content(item.url, timeout)
+                    fetch_result = fetch_page_content(item.url, timeout=10)
 
                     # コンテンツ長チェック
                     if len(fetch_result.content) < min_content_length:
