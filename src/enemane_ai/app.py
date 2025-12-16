@@ -15,8 +15,11 @@ import streamlit as st
 
 from enemane_ai.analyzer import (
     AVAILABLE_ARTICLE_THEMES,
+    BUILDING_TYPES,
     CALENDAR_ANALYSIS_PROMPT,
     CALENDAR_OUTPUT_FORMAT,
+    DEFAULT_MODEL_NAME,
+    FLASH_MODEL_NAME,
     OUTPUT_FORMAT_INSTRUCTION,
     PRESET_PROMPT,
     GeminiGraphLanguageModel,
@@ -27,13 +30,11 @@ from enemane_ai.analyzer import (
     build_power_calendar_context,
     build_supplementary_context,
     collect_graph_entries,
-    fetch_page_content,
-    is_likely_article_url,
+    collect_relevant_articles,
     parse_monthly_report_csv,
     parse_power_30min_csv,
     parse_temperature_csv_for_comparison,
     pdf_to_images,
-    search_with_duckduckgo,
     summarize_article,
 )
 
@@ -708,9 +709,26 @@ def render_calendar_analysis_tab() -> None:
         )
 
 
+def resolve_gemini_client_with_model(
+    model_name: str,
+) -> GeminiGraphLanguageModel | None:
+    """指定モデルでGeminiクライアントを生成する。"""
+    api_key = st.secrets.get("GEMINI_API_KEY") if hasattr(st, "secrets") else None
+    api_key = api_key or os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        st.error("GEMINI_API_KEY が見つかりません。secrets.toml または環境変数に設定してください。")
+        return None
+
+    try:
+        return GeminiGraphLanguageModel(api_key=api_key, model_name=model_name)
+    except Exception as exc:
+        st.error(f"Gemini クライアント生成に失敗しました: {exc}")
+        return None
+
+
 def render_article_search_tab() -> None:
     """記事検索・要約タブのUIを描画。"""
-    st.caption("コラムテーマを選択し、関連記事を検索してAIで要約します。")
+    st.caption("コラムテーマと建物タイプを選択し、適切な記事を収集してAIで要約します。")
 
     st.subheader("1. コラムテーマ選択")
     theme = st.selectbox(
@@ -720,90 +738,98 @@ def render_article_search_tab() -> None:
         key="article_theme",
     )
 
-    st.subheader("2. 送付先の建物タイプ (オプション)")
-    st.caption("建物タイプを選択すると、より関連性の高い記事を検索します")
+    st.subheader("2. 送付先の建物タイプ (必須)")
+    st.caption("建物タイプを選択すると、その建物タイプの担当者に適した記事のみを収集します")
     building_types = st.multiselect(
         "建物タイプを選択",
-        options=["オフィス", "自治体施設", "工場", "介護福祉施設"],
+        options=BUILDING_TYPES,
         default=[],
         key="article_building_types",
     )
-    target_context = ", ".join(building_types) if building_types else ""
 
-    if st.button("検索・要約を実行", type="primary", key="article_search_button"):
-        llm = resolve_gemini_client()
-        if llm is None:
+    # 建物タイプ未選択時の警告
+    if not building_types:
+        st.warning("建物タイプを1つ以上選択してください")
+
+    # 建物タイプが選択されている場合のみボタンを有効化
+    button_disabled = len(building_types) == 0
+
+    if st.button(
+        "検索・要約を実行",
+        type="primary",
+        key="article_search_button",
+        disabled=button_disabled,
+    ):
+        # 判定用Flash LLM と 要約用Pro LLM を生成
+        flash_llm = resolve_gemini_client_with_model(FLASH_MODEL_NAME)
+        pro_llm = resolve_gemini_client_with_model(DEFAULT_MODEL_NAME)
+
+        if flash_llm is None or pro_llm is None:
             return
 
         with st.status("処理中...", expanded=True) as status:
-            # Step 1: DuckDuckGoで検索
-            status.update(label="Web検索中...", state="running")
+            # Step 1: 適切な記事を収集 (Flashで判定)
+            status.update(label="記事を収集・判定中...", state="running")
+            st.info("適切な記事が20件集まるまで検索を続けます...")
+
             try:
-                search_results = search_with_duckduckgo(
-                    theme, target=target_context, max_results=10
+                collection_result = collect_relevant_articles(
+                    theme=theme,
+                    building_types=building_types,
+                    flash_llm=flash_llm,
+                    target_count=20,
+                    max_search_attempts=10,
                 )
-                st.info(f"{len(search_results)}件の検索結果を取得しました")
             except Exception as exc:
                 status.update(label="失敗", state="error")
-                st.error(f"検索に失敗しました: {exc}")
+                st.error(f"記事収集に失敗しました: {exc}")
                 return
 
-            if not search_results:
+            # 収集統計を表示
+            stopped_reason_ja = {
+                "target_reached": "目標達成",
+                "max_attempts": "検索上限",
+                "no_more_results": "結果なし",
+            }.get(collection_result.stopped_reason, collection_result.stopped_reason)
+
+            st.info(
+                f"検索: {collection_result.total_searched}件 → "
+                f"判定: {collection_result.total_judged}件 → "
+                f"適切: {len(collection_result.articles)}件 "
+                f"({stopped_reason_ja})"
+            )
+
+            if not collection_result.articles:
                 status.update(label="完了", state="complete")
-                st.warning("検索結果が見つかりませんでした。")
+                st.warning("適切な記事が見つかりませんでした。")
                 return
 
-            # Step 2: URLパターンフィルタリング
-            filtered_results = [item for item in search_results if is_likely_article_url(item.url)]
-            if len(filtered_results) < len(search_results):
-                st.info(f"URLフィルタリング: {len(search_results)}件 → {len(filtered_results)}件")
-
-            if not filtered_results:
-                status.update(label="完了", state="complete")
-                st.warning("記事ページが見つかりませんでした。")
-                return
-
-            # Step 3: 各ページを取得・要約
-            status.update(label="記事を取得・要約中...", state="running")
+            # Step 2: 適切な記事を要約 (Proで要約)
+            status.update(label="記事を要約中...", state="running")
             results: list[ArticleOutputRow] = []
             progress_bar = st.progress(0)
-            min_content_length = 300  # 最小コンテンツ長
 
-            for i, item in enumerate(filtered_results):
+            for i, article in enumerate(collection_result.articles):
                 try:
-                    # ページ取得
-                    fetch_result = fetch_page_content(item.url, timeout=10)
-
-                    # コンテンツ長チェック
-                    if len(fetch_result.content) < min_content_length:
-                        st.warning(f"コンテンツが短いためスキップ: {item.url}")
-                        progress_bar.progress((i + 1) / len(filtered_results))
-                        continue
-
-                    # 要約生成
-                    if fetch_result.content:
-                        summary = summarize_article(
-                            fetch_result.content,
-                            llm,
-                            title=fetch_result.title or item.title,
-                            url=item.url,
-                        )
-                    else:
-                        summary = item.body or "本文を取得できませんでした"
-
+                    summary = summarize_article(
+                        article.content,
+                        pro_llm,
+                        title=article.title,
+                        url=article.link,
+                    )
                     results.append(
                         ArticleOutputRow(
                             theme=theme,
-                            title=fetch_result.title or item.title,
+                            title=article.title,
                             content=summary,
-                            image=fetch_result.og_image,
-                            link=item.url,
+                            image=article.og_image,
+                            link=article.link,
                         )
                     )
                 except Exception as exc:
-                    st.warning(f"記事取得エラー ({item.url}): {exc}")
+                    st.warning(f"要約エラー ({article.link}): {exc}")
 
-                progress_bar.progress((i + 1) / len(filtered_results))
+                progress_bar.progress((i + 1) / len(collection_result.articles))
 
             status.update(label="完了", state="complete")
 
@@ -811,8 +837,10 @@ def render_article_search_tab() -> None:
         st.subheader("結果")
 
         if not results:
-            st.warning("検索結果がありません。")
+            st.warning("要約結果がありません。")
             return
+
+        st.success(f"{len(results)}件の記事を要約しました")
 
         # テーブル表示
         st.markdown("#### テーブル出力")

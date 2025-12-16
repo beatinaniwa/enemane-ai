@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import re
 from collections import defaultdict
@@ -8,7 +9,7 @@ from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 from textwrap import dedent
-from typing import Iterable, Protocol, Sequence, cast
+from typing import Callable, Iterable, Protocol, Sequence, cast
 
 import pypdfium2 as pdfium
 import requests
@@ -810,14 +811,9 @@ ARTICLE_SUMMARIZATION_PROMPT = dedent(
 
     #出力形式
 
-    以下の形式で出力してください。ラベル(「要約本文:」等)は付けず、本文のみ出力。
+    要約本文: 約[300-600]字、敬体、独自表現。
 
-    ## タイトル
-    [入力で与えられた元記事タイトルをそのまま使用]
-
-    [要約本文: 約300-600字、敬体、独自表現]
-
-    ## 出典
+    出典
     - タイトル: [元記事タイトル]
     - URL: [元記事URL]
     - 著者: [著者名。不明な場合は省略]
@@ -1054,6 +1050,121 @@ THEME_SEARCH_QUERIES: dict[str, list[str]] = {
 # 利用可能なテーマ一覧
 AVAILABLE_ARTICLE_THEMES = list(THEME_SEARCH_QUERIES.keys())
 
+# 建物タイプ一覧
+BUILDING_TYPES = ["オフィス", "自治体施設", "工場", "介護福祉施設"]
+
+# 記事適切性判定用モデル (高速・安価)
+FLASH_MODEL_NAME = "gemini-2.5-flash"
+
+# 適切性判定プロンプト
+ARTICLE_RELEVANCE_PROMPT = dedent(
+    """
+    あなたは省エネ・環境関連の記事の適切性を判定するエキスパートです。
+
+    以下の記事が、指定された建物タイプの担当者にとって
+    有益で適切な内容かどうかを判定してください。
+
+    #建物タイプ
+    {building_type}
+
+    #判定基準
+    1. 建物タイプに関連する省エネ・環境対策の情報が含まれている
+    2. 実用的なアクションや知見が得られる
+    3. 広告・宣伝目的ではなく、情報提供を目的としている
+    4. 日本国内で適用可能な内容である
+
+    #出力形式
+    以下のJSON形式のみで出力してください(他の文章は不要):
+    {{"is_relevant": true または false, "reason": "判定理由を50文字以内で"}}
+
+    #入力記事
+    タイトル: {title}
+    URL: {url}
+    本文:
+    {content}
+    """
+)
+
+
+@dataclass
+class ArticleRelevanceResult:
+    """記事適切性判定結果"""
+
+    is_relevant: bool
+    reason: str
+    url: str
+    title: str
+
+
+@dataclass
+class ArticleCollectionResult:
+    """記事収集結果"""
+
+    articles: list[ArticleFetchResult]
+    relevance_results: list[ArticleRelevanceResult]
+    total_searched: int
+    total_judged: int
+    stopped_reason: str  # "target_reached" / "max_attempts" / "no_more_results"
+
+
+def judge_article_relevance(
+    content: str,
+    title: str,
+    url: str,
+    building_type: str,
+    llm: GraphLanguageModel,
+) -> ArticleRelevanceResult:
+    """
+    記事が対象建物タイプにとって適切かを判定する。
+
+    Args:
+        content: 記事本文
+        title: 記事タイトル
+        url: 記事URL
+        building_type: 建物タイプ (オフィス/自治体施設/工場/介護福祉施設)
+        llm: Gemini Flash クライアント
+
+    Returns:
+        ArticleRelevanceResult: 判定結果
+    """
+    # コンテンツを適切な長さに切り詰め (判定にはフル本文不要、コスト削減)
+    truncated_content = content[:3000] if len(content) > 3000 else content
+
+    prompt = ARTICLE_RELEVANCE_PROMPT.format(
+        building_type=building_type,
+        title=title,
+        url=url,
+        content=truncated_content,
+    )
+
+    response = llm.comment_on_text(truncated_content, prompt)
+
+    # JSON解析
+    try:
+        # コードフェンスを除去
+        cleaned = response.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.split("\n")
+            # 最初と最後の```行を除去
+            lines = [line for line in lines if not line.strip().startswith("```")]
+            cleaned = "\n".join(lines)
+
+        data = json.loads(cleaned)
+        return ArticleRelevanceResult(
+            is_relevant=bool(data.get("is_relevant", False)),
+            reason=str(data.get("reason", "")),
+            url=url,
+            title=title,
+        )
+    except (json.JSONDecodeError, KeyError):
+        # パース失敗時はフォールスルー (適切と判定して収集を継続)
+        return ArticleRelevanceResult(
+            is_relevant=True,
+            reason="判定不能のため通過",
+            url=url,
+            title=title,
+        )
+
 
 def search_with_duckduckgo(
     theme: str,
@@ -1116,3 +1227,119 @@ def search_with_duckduckgo(
         )
         for r in all_results
     ]
+
+
+def collect_relevant_articles(
+    theme: str,
+    building_types: list[str],
+    flash_llm: GraphLanguageModel,
+    target_count: int = 20,
+    max_search_attempts: int = 10,
+    progress_callback: Callable[[int, int, int], None] | None = None,
+) -> ArticleCollectionResult:
+    """
+    適切な記事を指定件数集まるまで収集する。
+
+    Args:
+        theme: 検索テーマ
+        building_types: 建物タイプのリスト
+        flash_llm: Gemini Flash クライアント (判定用)
+        target_count: 目標記事数 (デフォルト20)
+        max_search_attempts: 最大検索回数 (無限ループ防止)
+        progress_callback: 進捗コールバック (searched, judged, collected)
+
+    Returns:
+        ArticleCollectionResult: 収集結果
+    """
+    collected_articles: list[ArticleFetchResult] = []
+    all_relevance_results: list[ArticleRelevanceResult] = []
+    seen_urls: set[str] = set()
+    total_searched = 0
+    total_judged = 0
+
+    # 建物タイプをコンテキストとして結合
+    building_context = "、".join(building_types)
+
+    # テーマに対応する検索クエリを取得
+    search_queries = THEME_SEARCH_QUERIES.get(theme, [f"{theme} コラム 記事"])
+
+    # 各クエリで順番に検索
+    for attempt, query in enumerate(search_queries):
+        if attempt >= max_search_attempts:
+            break
+
+        if len(collected_articles) >= target_count:
+            break
+
+        # ターゲット (建物タイプ) をクエリに追加
+        full_query = f"{building_context} {query}"
+
+        try:
+            ddgs = DDGS()
+            results = ddgs.text(
+                full_query,
+                region="jp-jp",
+                max_results=20,
+            )
+        except Exception:
+            continue
+
+        for r in results:
+            url = r.get("href", "")
+            if not url or url in seen_urls:
+                continue
+
+            seen_urls.add(url)
+            total_searched += 1
+
+            # URLパターンフィルタリング
+            if not is_likely_article_url(url):
+                continue
+
+            # ページ取得
+            try:
+                fetch_result = fetch_page_content(url, timeout=10)
+            except Exception:
+                continue
+
+            # コンテンツ長チェック (最小300文字)
+            if len(fetch_result.content) < 300:
+                continue
+
+            total_judged += 1
+
+            # 適切性判定
+            relevance = judge_article_relevance(
+                content=fetch_result.content,
+                title=fetch_result.title or r.get("title", ""),
+                url=url,
+                building_type=building_context,
+                llm=flash_llm,
+            )
+            all_relevance_results.append(relevance)
+
+            if relevance.is_relevant:
+                collected_articles.append(fetch_result)
+
+                # 進捗コールバック
+                if progress_callback:
+                    progress_callback(total_searched, total_judged, len(collected_articles))
+
+                if len(collected_articles) >= target_count:
+                    return ArticleCollectionResult(
+                        articles=collected_articles,
+                        relevance_results=all_relevance_results,
+                        total_searched=total_searched,
+                        total_judged=total_judged,
+                        stopped_reason="target_reached",
+                    )
+
+    # ループ終了 (目標未達またはクエリ枯渇)
+    stopped_reason = "max_attempts" if total_searched > 0 else "no_more_results"
+    return ArticleCollectionResult(
+        articles=collected_articles,
+        relevance_results=all_relevance_results,
+        total_searched=total_searched,
+        total_judged=total_judged,
+        stopped_reason=stopped_reason,
+    )

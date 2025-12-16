@@ -18,6 +18,7 @@ from enemane_ai.analyzer import (
     build_power_calendar_context,
     build_supplementary_context,
     collect_graph_entries,
+    judge_article_relevance,
     parse_monthly_report_csv,
     parse_power_30min_csv,
     parse_temperature_csv_for_comparison,
@@ -395,3 +396,84 @@ def test_build_power_calendar_context() -> None:
     assert "290.0 kWh/日" in context
     assert "95.0 kWh/日" in context
     assert "上位5日" in context
+
+
+# =============================================================================
+# 記事適切性判定機能のテスト
+# =============================================================================
+
+
+def test_judge_article_relevance_returns_true_for_relevant() -> None:
+    """関連記事は is_relevant=True を返す."""
+    llm = DummyLLM('{"is_relevant": true, "reason": "オフィスの省エネに関連"}')
+    result = judge_article_relevance(
+        content="オフィスビルの空調省エネ対策について詳しく解説します。",
+        title="オフィス空調の省エネ",
+        url="https://example.com/article",
+        building_type="オフィス",
+        llm=llm,
+    )
+    assert result.is_relevant is True
+    assert "省エネ" in result.reason
+    assert result.url == "https://example.com/article"
+    assert result.title == "オフィス空調の省エネ"
+
+
+def test_judge_article_relevance_returns_false_for_irrelevant() -> None:
+    """無関係記事は is_relevant=False を返す."""
+    llm = DummyLLM('{"is_relevant": false, "reason": "建物タイプと無関係"}')
+    result = judge_article_relevance(
+        content="自動車のカスタマイズについて...",
+        title="車のチューニング",
+        url="https://example.com/cars",
+        building_type="介護福祉施設",
+        llm=llm,
+    )
+    assert result.is_relevant is False
+    assert "無関係" in result.reason
+
+
+def test_judge_article_relevance_handles_json_error() -> None:
+    """JSONパースエラー時はフォールスルー (True)."""
+    llm = DummyLLM("invalid json response")
+    result = judge_article_relevance(
+        content="何らかの記事内容",
+        title="Test",
+        url="https://example.com",
+        building_type="工場",
+        llm=llm,
+    )
+    # パース失敗時は適切と判定してフォールスルー
+    assert result.is_relevant is True
+    assert "判定不能" in result.reason
+
+
+def test_judge_article_relevance_handles_code_fence() -> None:
+    """コードフェンス付きJSON応答を正しくパースする."""
+    llm = DummyLLM('```json\n{"is_relevant": true, "reason": "適切な記事"}\n```')
+    result = judge_article_relevance(
+        content="省エネに関する記事",
+        title="省エネ記事",
+        url="https://example.com/energy",
+        building_type="オフィス",
+        llm=llm,
+    )
+    assert result.is_relevant is True
+    assert result.reason == "適切な記事"
+
+
+def test_judge_article_relevance_truncates_long_content() -> None:
+    """長いコンテンツは3000文字に切り詰められる."""
+    long_content = "あ" * 5000
+    llm = DummyLLM('{"is_relevant": true, "reason": "OK"}')
+    result = judge_article_relevance(
+        content=long_content,
+        title="Test",
+        url="https://example.com",
+        building_type="オフィス",
+        llm=llm,
+    )
+    # LLMに渡されたテキストが3000文字に切り詰められていることを確認
+    assert llm.last_text is not None
+    assert len(llm.last_text) == 3000
+    assert result.is_relevant is True
