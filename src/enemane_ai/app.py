@@ -909,10 +909,7 @@ def render_article_search_tab() -> None:
                 with cols[1]:
                     st.markdown(f"**{row.title}**")
                     st.caption(f"テーマ: {row.theme}")
-                    content_preview = (
-                        row.content[:200] + "..." if len(row.content) > 200 else row.content
-                    )
-                    st.markdown(content_preview)
+                    st.markdown(row.content)
                     st.markdown(f"[記事を開く]({row.link})")
                 st.divider()
 
