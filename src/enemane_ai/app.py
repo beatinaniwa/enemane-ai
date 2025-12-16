@@ -803,11 +803,11 @@ def render_article_search_tab() -> None:
                     else:
                         icon = "❌"
                         result_text = "不適切"
-                    log_entry = f"{icon} [{result_text}] {info.title[:40]}... - {info.reason[:30]}"
+                    # タイトルと理由を改行して表示
+                    log_entry = f"{icon} **[{result_text}]** {info.title}\n" f"   └ {info.reason}\n"
                     log_entries.append(log_entry)
-                    # 最新10件を表示
-                    display_logs = log_entries[-10:]
-                    article_log.markdown("\n".join(display_logs))
+                    # 全件を表示
+                    article_log.markdown("\n".join(log_entries))
 
             try:
                 collection_result = collect_relevant_articles(
