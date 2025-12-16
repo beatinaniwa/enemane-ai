@@ -796,17 +796,21 @@ class ArticleFetchResult:
 
 ARTICLE_SUMMARIZATION_PROMPT = dedent(
     """
-    あなたは記事要約の専門家です。
-    以下の記事本文を読み、簡潔に要約してください。
+    あなたは、公開ブログ向けに合法性へ配慮して要約するライターです。
+    下記の文章を、以下の制約を満たすよう要約してください。
 
-    ■ ルール
-    - 2〜4文で要約する
-    - 重要なポイントを抽出する
-    - 専門用語はそのまま残す
-    - 読者が記事を読むかどうか判断できる情報を含める
+    #制約
 
-    ■ 出力形式
-    要約文のみを出力(JSON不要)
+    表現の独自化: 事実・主張・根拠を高い抽象度で再記述し、
+    原文の決まり文句や比喩・見出し・段落構成を踏襲しない。連続7語以上の一致を禁止。
+
+    再構成: 要点ごとに並べ替え可。原文特有の具体例や固有のリストは一般化する。
+
+    自己チェック: 生成後に語句の類似が強い箇所をさらに抽象化して言い換える。
+
+    #出力形式
+
+    要約本文: 約300-600字、敬体、独自表現。
     """
 )
 
@@ -964,7 +968,7 @@ def summarize_article(content: str, llm: GraphLanguageModel) -> str:
     Returns:
         str: 要約文
     """
-    prompt = f"{ARTICLE_SUMMARIZATION_PROMPT}\n\n【記事本文】\n{content}"
+    prompt = f"{ARTICLE_SUMMARIZATION_PROMPT}\n\n#入力内容\n\n入力本文:\n{content}"
     return llm.comment_on_text(content, prompt)
 
 
@@ -977,6 +981,50 @@ class DuckDuckGoSearchResult:
     body: str  # スニペット
 
 
+# コラムテーマ種別
+ARTICLE_THEME_LAW = "法令改正"
+ARTICLE_THEME_TREND = "社会トレンド"
+ARTICLE_THEME_CASE = "他社事例"
+ARTICLE_THEME_ADVANCED = "先進事例"
+ARTICLE_THEME_BEHAVIOR = "従業員行動改善"
+
+# テーマ別の検索クエリテンプレート
+THEME_SEARCH_QUERIES: dict[str, list[str]] = {
+    ARTICLE_THEME_LAW: [
+        "省エネ法 改正 2025 解説 資源エネルギー庁",
+        "建築物省エネ法 改正 解説 国交省",
+        "法令概要 企業向け 資料",
+    ],
+    ARTICLE_THEME_TREND: [
+        "ESG 情報開示 日本 最新ガイドライン",
+        "脱炭素 企業 動向",
+        "再エネ 導入 トレンド 企業",
+        "サステナビリティ開示 義務化 日本",
+    ],
+    ARTICLE_THEME_CASE: [
+        "省エネ 事例 製造業 導入例",
+        "企業 省エネ 導入 成功事例 LED 空調 太陽光",
+        "EMS 導入 企業 事例 日本",
+        "環境省 補助金 活用事例",
+    ],
+    ARTICLE_THEME_ADVANCED: [
+        "省エネ 先進事例 企業",
+        "再エネ 先進的 取り組み 企業",
+        "カーボンニュートラル 先進企業 事例",
+        "ZEB ZEH 先進事例",
+    ],
+    ARTICLE_THEME_BEHAVIOR: [
+        "従業員 省エネ 行動 改善",
+        "オフィス 省エネ 従業員 意識",
+        "企業 省エネ 社員教育 事例",
+        "エコアクション 従業員参加",
+    ],
+}
+
+# 利用可能なテーマ一覧
+AVAILABLE_ARTICLE_THEMES = list(THEME_SEARCH_QUERIES.keys())
+
+
 def search_with_duckduckgo(
     theme: str,
     target: str | None = None,
@@ -986,24 +1034,49 @@ def search_with_duckduckgo(
     DuckDuckGoで記事を検索する。
 
     Args:
-        theme: 検索テーマ
+        theme: 検索テーマ (法令改正/社会トレンド/他社事例/先進事例/従業員行動改善)
         target: 送付先の属性 (検索キーワードに追加)
         max_results: 最大取得件数
 
     Returns:
         list[DuckDuckGoSearchResult]: 検索結果のリスト
     """
-    # 検索クエリ構築
-    query = f"{theme} コラム 記事"
-    if target and target.strip():
-        query = f"{target} {query}"
-
     ddgs = DDGS()
-    results = ddgs.text(
-        query,
-        region="jp-jp",
-        max_results=max_results,
-    )
+    all_results: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+
+    # テーマに対応する検索クエリを取得
+    search_queries = THEME_SEARCH_QUERIES.get(theme, [f"{theme} コラム 記事"])
+
+    # 各クエリで検索し、結果をマージ
+    results_per_query = max(max_results // len(search_queries), 3)
+
+    for query in search_queries:
+        # ターゲットが指定されている場合はクエリに追加
+        if target and target.strip():
+            query = f"{target} {query}"
+
+        try:
+            results = ddgs.text(
+                query,
+                region="jp-jp",
+                max_results=results_per_query,
+            )
+            for r in results:
+                url = r.get("href", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    all_results.append(r)
+        except Exception:
+            # 個別クエリの失敗は無視して続行
+            continue
+
+        # 十分な結果が得られたら終了
+        if len(all_results) >= max_results:
+            break
+
+    # 最大件数に制限
+    all_results = all_results[:max_results]
 
     return [
         DuckDuckGoSearchResult(
@@ -1011,5 +1084,5 @@ def search_with_duckduckgo(
             url=r.get("href", ""),
             body=r.get("body", ""),
         )
-        for r in results
+        for r in all_results
     ]

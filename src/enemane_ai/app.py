@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Iterable
 import streamlit as st
 
 from enemane_ai.analyzer import (
+    AVAILABLE_ARTICLE_THEMES,
     CALENDAR_ANALYSIS_PROMPT,
     CALENDAR_OUTPUT_FORMAT,
     OUTPUT_FORMAT_INSTRUCTION,
@@ -709,12 +710,13 @@ def render_calendar_analysis_tab() -> None:
 
 def render_article_search_tab() -> None:
     """記事検索・要約タブのUIを描画。"""
-    st.caption("テーマを入力し、関連記事を検索してAIで要約します。")
+    st.caption("コラムテーマを選択し、関連記事を検索してAIで要約します。")
 
-    st.subheader("1. テーマ入力")
-    theme = st.text_input(
-        "検索したいテーマを入力してください",
-        placeholder="例: 省エネ対策 オフィス 電力削減",
+    st.subheader("1. コラムテーマ選択")
+    theme = st.selectbox(
+        "検索したいコラムテーマを選択してください",
+        options=AVAILABLE_ARTICLE_THEMES,
+        index=0,
         key="article_theme",
     )
 
@@ -736,10 +738,6 @@ def render_article_search_tab() -> None:
         value=10,
         key="article_timeout",
     )
-
-    if not theme:
-        st.info("テーマを入力してください。")
-        return
 
     if st.button("検索・要約を実行", type="primary", key="article_search_button"):
         llm = resolve_gemini_client()
