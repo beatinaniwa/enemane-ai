@@ -473,7 +473,13 @@ def test_judge_article_relevance_truncates_long_content() -> None:
         building_type="オフィス",
         llm=llm,
     )
-    # LLMに渡されたテキストが3000文字に切り詰められていることを確認
-    assert llm.last_text is not None
-    assert len(llm.last_text) == 3000
+    # プロンプトに埋め込まれたコンテンツが3000文字に切り詰められていることを確認
+    # (テキストは空文字列で渡される - 二重送信防止のため)
+    assert llm.last_text == ""
+    assert llm.last_prompt is not None
+    # プロンプト内に切り詰められたコンテンツ (3000文字の"あ") が含まれている
+    truncated = "あ" * 3000
+    assert truncated in llm.last_prompt
+    # 5000文字のフルコンテンツは含まれていない
+    assert long_content not in llm.last_prompt
     assert result.is_relevant is True

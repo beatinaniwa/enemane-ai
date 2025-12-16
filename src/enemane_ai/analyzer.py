@@ -1137,7 +1137,9 @@ def judge_article_relevance(
         content=truncated_content,
     )
 
-    response = llm.comment_on_text(truncated_content, prompt)
+    # プロンプトに記事内容が既に含まれているため、textは空文字列を渡す
+    # (二重送信によるトークン使用量の増加を防ぐ)
+    response = llm.comment_on_text("", prompt)
 
     # JSON解析
     try:
