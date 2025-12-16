@@ -900,8 +900,12 @@ def render_article_search_tab() -> None:
             with st.container():
                 cols = st.columns([1, 3])
                 with cols[0]:
-                    if row.image:
-                        st.image(row.image, width=150)
+                    # 画像URLが完全なURLかチェック (相対パスはエラーになる)
+                    if row.image and row.image.startswith(("http://", "https://")):
+                        try:
+                            st.image(row.image, width=150)
+                        except Exception:
+                            st.markdown("*画像読込エラー*")
                     else:
                         st.markdown("*画像なし*")
                 with cols[1]:
