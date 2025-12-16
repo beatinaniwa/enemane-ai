@@ -22,6 +22,7 @@ from enemane_ai.analyzer import (
     FLASH_MODEL_NAME,
     OUTPUT_FORMAT_INSTRUCTION,
     PRESET_PROMPT,
+    ArticleProgressInfo,
     GeminiGraphLanguageModel,
     GraphLanguageModel,
     MonthlyReportData,
@@ -774,7 +775,39 @@ def render_article_search_tab() -> None:
         with st.status("処理中...", expanded=True) as status:
             # Step 1: 適切な記事を収集 (Flashで判定)
             status.update(label="記事を収集・判定中...", state="running")
-            st.info("適切な記事が20件集まるまで検索を続けます...")
+
+            # 進捗表示用のプレースホルダー
+            progress_header = st.empty()
+            query_display = st.empty()
+            article_log = st.empty()
+            log_entries: list[str] = []
+
+            def on_progress(info: ArticleProgressInfo) -> None:
+                """進捗コールバック"""
+                # ヘッダー更新
+                progress_header.markdown(
+                    f"**収集状況:** {info.total_collected}/{info.target_count}件 "
+                    f"(検索: {info.total_searched}, 判定: {info.total_judged})"
+                )
+
+                if info.event == "query_start":
+                    query_display.info(f"🔍 検索クエリ: {info.query}")
+                elif info.event == "article_found":
+                    # 最新の記事を表示
+                    query_display.info(f"📄 取得中: {info.title[:50]}...")
+                elif info.event == "article_judged":
+                    # 判定結果をログに追加
+                    if info.is_relevant:
+                        icon = "✅"
+                        result_text = "適切"
+                    else:
+                        icon = "❌"
+                        result_text = "不適切"
+                    log_entry = f"{icon} [{result_text}] {info.title[:40]}... - {info.reason[:30]}"
+                    log_entries.append(log_entry)
+                    # 最新10件を表示
+                    display_logs = log_entries[-10:]
+                    article_log.markdown("\n".join(display_logs))
 
             try:
                 collection_result = collect_relevant_articles(
@@ -783,6 +816,7 @@ def render_article_search_tab() -> None:
                     flash_llm=flash_llm,
                     target_count=20,
                     max_search_attempts=10,
+                    progress_callback=on_progress,
                 )
             except Exception as exc:
                 status.update(label="失敗", state="error")
@@ -796,10 +830,15 @@ def render_article_search_tab() -> None:
                 "no_more_results": "結果なし",
             }.get(collection_result.stopped_reason, collection_result.stopped_reason)
 
-            st.info(
-                f"検索: {collection_result.total_searched}件 → "
-                f"判定: {collection_result.total_judged}件 → "
-                f"適切: {len(collection_result.articles)}件 "
+            # プレースホルダーをクリアして最終結果を表示
+            progress_header.empty()
+            query_display.empty()
+            article_log.empty()
+
+            st.success(
+                f"収集完了: 検索 {collection_result.total_searched}件 → "
+                f"判定 {collection_result.total_judged}件 → "
+                f"適切 {len(collection_result.articles)}件 "
                 f"({stopped_reason_ja})"
             )
 
@@ -812,8 +851,14 @@ def render_article_search_tab() -> None:
             status.update(label="記事を要約中...", state="running")
             results: list[ArticleOutputRow] = []
             progress_bar = st.progress(0)
+            summary_status = st.empty()
 
             for i, article in enumerate(collection_result.articles):
+                # 要約中の記事を表示
+                summary_status.info(
+                    f"📝 要約中 ({i + 1}/{len(collection_result.articles)}): "
+                    f"{article.title[:50]}..."
+                )
                 try:
                     summary = summarize_article(
                         article.content,
@@ -834,6 +879,8 @@ def render_article_search_tab() -> None:
                     st.warning(f"要約エラー ({article.link}): {exc}")
 
                 progress_bar.progress((i + 1) / len(collection_result.articles))
+
+            summary_status.empty()
 
             status.update(label="完了", state="complete")
 

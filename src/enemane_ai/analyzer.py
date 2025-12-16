@@ -1229,13 +1229,29 @@ def search_with_duckduckgo(
     ]
 
 
+@dataclass
+class ArticleProgressInfo:
+    """記事収集の進捗情報"""
+
+    event: str  # "query_start" / "article_found" / "article_judged"
+    query: str  # 現在の検索クエリ
+    title: str  # 記事タイトル
+    url: str  # 記事URL
+    is_relevant: bool | None  # 適切性判定結果 (None=未判定)
+    reason: str  # 判定理由
+    total_searched: int  # 検索した記事数
+    total_judged: int  # 判定した記事数
+    total_collected: int  # 収集した記事数
+    target_count: int  # 目標記事数
+
+
 def collect_relevant_articles(
     theme: str,
     building_types: list[str],
     flash_llm: GraphLanguageModel,
     target_count: int = 20,
     max_search_attempts: int = 10,
-    progress_callback: Callable[[int, int, int], None] | None = None,
+    progress_callback: Callable[[ArticleProgressInfo], None] | None = None,
 ) -> ArticleCollectionResult:
     """
     適切な記事を指定件数集まるまで収集する。
@@ -1246,7 +1262,7 @@ def collect_relevant_articles(
         flash_llm: Gemini Flash クライアント (判定用)
         target_count: 目標記事数 (デフォルト20)
         max_search_attempts: 最大検索回数 (無限ループ防止)
-        progress_callback: 進捗コールバック (searched, judged, collected)
+        progress_callback: 進捗コールバック (ArticleProgressInfo)
 
     Returns:
         ArticleCollectionResult: 収集結果
@@ -1274,6 +1290,23 @@ def collect_relevant_articles(
         # ターゲット (建物タイプ) をクエリに追加
         full_query = f"{building_context} {query}"
 
+        # クエリ開始を通知
+        if progress_callback:
+            progress_callback(
+                ArticleProgressInfo(
+                    event="query_start",
+                    query=full_query,
+                    title="",
+                    url="",
+                    is_relevant=None,
+                    reason="",
+                    total_searched=total_searched,
+                    total_judged=total_judged,
+                    total_collected=len(collected_articles),
+                    target_count=target_count,
+                )
+            )
+
         try:
             ddgs = DDGS()
             results = ddgs.text(
@@ -1291,6 +1324,24 @@ def collect_relevant_articles(
 
             seen_urls.add(url)
             total_searched += 1
+            title = r.get("title", "")
+
+            # 記事発見を通知
+            if progress_callback:
+                progress_callback(
+                    ArticleProgressInfo(
+                        event="article_found",
+                        query=full_query,
+                        title=title,
+                        url=url,
+                        is_relevant=None,
+                        reason="取得中...",
+                        total_searched=total_searched,
+                        total_judged=total_judged,
+                        total_collected=len(collected_articles),
+                        target_count=target_count,
+                    )
+                )
 
             # URLパターンフィルタリング
             if not is_likely_article_url(url):
@@ -1311,19 +1362,36 @@ def collect_relevant_articles(
             # 適切性判定
             relevance = judge_article_relevance(
                 content=fetch_result.content,
-                title=fetch_result.title or r.get("title", ""),
+                title=fetch_result.title or title,
                 url=url,
                 building_type=building_context,
                 llm=flash_llm,
             )
             all_relevance_results.append(relevance)
 
+            # 判定結果を通知
+            if progress_callback:
+                progress_callback(
+                    ArticleProgressInfo(
+                        event="article_judged",
+                        query=full_query,
+                        title=fetch_result.title or title,
+                        url=url,
+                        is_relevant=relevance.is_relevant,
+                        reason=relevance.reason,
+                        total_searched=total_searched,
+                        total_judged=total_judged,
+                        total_collected=(
+                            len(collected_articles) + 1
+                            if relevance.is_relevant
+                            else len(collected_articles)
+                        ),
+                        target_count=target_count,
+                    )
+                )
+
             if relevance.is_relevant:
                 collected_articles.append(fetch_result)
-
-                # 進捗コールバック
-                if progress_callback:
-                    progress_callback(total_searched, total_judged, len(collected_articles))
 
                 if len(collected_articles) >= target_count:
                     return ArticleCollectionResult(
