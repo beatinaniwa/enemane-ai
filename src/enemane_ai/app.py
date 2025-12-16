@@ -791,7 +791,12 @@ def render_article_search_tab() -> None:
 
                     # 要約生成
                     if fetch_result.content:
-                        summary = summarize_article(fetch_result.content, llm)
+                        summary = summarize_article(
+                            fetch_result.content,
+                            llm,
+                            title=fetch_result.title or item.title,
+                            url=item.url,
+                        )
                     else:
                         summary = item.body or "本文を取得できませんでした"
 

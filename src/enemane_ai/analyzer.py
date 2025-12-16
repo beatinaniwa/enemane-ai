@@ -810,7 +810,17 @@ ARTICLE_SUMMARIZATION_PROMPT = dedent(
 
     #出力形式
 
-    要約本文: 約300-600字、敬体、独自表現。
+    以下の形式で出力してください。ラベル(「要約本文:」等)は付けず、本文のみ出力。
+
+    ## タイトル
+    [入力で与えられた元記事タイトルをそのまま使用]
+
+    [要約本文: 約300-600字、敬体、独自表現]
+
+    ## 出典
+    - タイトル: [元記事タイトル]
+    - URL: [元記事URL]
+    - 著者: [著者名。不明な場合は省略]
     """
 )
 
@@ -957,18 +967,38 @@ def fetch_page_content(url: str, timeout: int = 10) -> ArticleFetchResult:
     )
 
 
-def summarize_article(content: str, llm: GraphLanguageModel) -> str:
+def summarize_article(
+    content: str,
+    llm: GraphLanguageModel,
+    *,
+    title: str = "",
+    url: str = "",
+    author: str = "",
+) -> str:
     """
     記事本文をGeminiで要約する。
 
     Args:
         content: 記事本文
         llm: Geminiクライアント
+        title: 元記事タイトル
+        url: 元記事URL
+        author: 著者名 (不明な場合は空文字)
 
     Returns:
         str: 要約文
     """
-    prompt = f"{ARTICLE_SUMMARIZATION_PROMPT}\n\n#入力内容\n\n入力本文:\n{content}"
+    input_parts = [
+        "#入力内容",
+        f"元記事タイトル: {title}" if title else "",
+        f"元記事URL: {url}" if url else "",
+        f"著者: {author}" if author else "",
+        "",
+        "入力本文:",
+        content,
+    ]
+    input_section = "\n".join(part for part in input_parts if part or part == "")
+    prompt = f"{ARTICLE_SUMMARIZATION_PROMPT}\n\n{input_section}"
     return llm.comment_on_text(content, prompt)
 
 
