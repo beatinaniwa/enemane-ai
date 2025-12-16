@@ -9,13 +9,17 @@ from pytest import MonkeyPatch
 from enemane_ai import analyzer
 from enemane_ai.analyzer import (
     PRESET_PROMPT,
+    DailyPowerSummary,
+    MonthlyPowerCalendarData,
     MonthlyReportData,
     MonthlyTemperatureSummary,
     analyze_image,
     analyze_text,
+    build_power_calendar_context,
     build_supplementary_context,
     collect_graph_entries,
     parse_monthly_report_csv,
+    parse_power_30min_csv,
     parse_temperature_csv_for_comparison,
 )
 
@@ -302,3 +306,83 @@ def test_build_supplementary_context_with_data() -> None:
 def test_build_supplementary_context_with_none() -> None:
     context = build_supplementary_context(None, None)
     assert context == ""
+
+
+def test_parse_power_30min_csv(tmp_path: Path) -> None:
+    csv_path = tmp_path / "PDU_30min_202410.csv"
+    csv_path.write_bytes(
+        (
+            "計測対象,コントローラ1,,,,,,,\n"
+            ",機器31-1,,,,,,,,\n"
+            ",受電電力量,,,,,,,,\n"
+            ",kWh,,,,,,,,\n"
+            "2024-10-01 00:00,4.29,,,,,,,\n"
+            "2024-10-01 00:30,4.04,,,,,,,\n"
+            "2024-10-01 01:00,4.08,,,,,,,\n"
+            "2024-10-05 00:00,3.50,,,,,,,\n"  # 土曜日
+            "2024-10-05 00:30,3.60,,,,,,,\n"
+            "2024-10-06 00:00,3.20,,,,,,,\n"  # 日曜日
+            "2024-10-06 00:30,3.30,,,,,,,\n"
+        ).encode("cp932")
+    )
+
+    data = parse_power_30min_csv(csv_path)
+
+    assert data.year_month == "2024年10月"
+    assert len(data.daily_summaries) == 3
+    # 10/1のデータ確認
+    day1 = data.daily_summaries[0]
+    assert day1.date == "2024-10-01"
+    assert day1.day_of_week == "火"
+    assert day1.total_kwh == 4.29 + 4.04 + 4.08
+    assert day1.max_kwh == 4.29
+    assert day1.max_time == "00:00"
+    # 最大需要日
+    assert "1日" in data.max_demand_day
+    # 平日/休日平均
+    assert data.weekday_avg_kwh > 0
+    assert data.weekend_avg_kwh > 0
+
+
+def test_parse_power_30min_csv_no_data(tmp_path: Path) -> None:
+    csv_path = tmp_path / "empty.csv"
+    csv_path.write_text("header1,header2\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="有効な30分電力データがありません"):
+        parse_power_30min_csv(csv_path)
+
+
+def test_build_power_calendar_context() -> None:
+    data = MonthlyPowerCalendarData(
+        year_month="2024年10月",
+        daily_summaries=[
+            DailyPowerSummary(
+                date="2024-10-01",
+                day_of_week="火",
+                total_kwh=300.0,
+                max_kwh=21.5,
+                max_time="14:00",
+            ),
+            DailyPowerSummary(
+                date="2024-10-05",
+                day_of_week="土",
+                total_kwh=100.0,
+                max_kwh=8.0,
+                max_time="10:00",
+            ),
+        ],
+        total_monthly_kwh=8500.0,
+        max_demand_day="1日(火)",
+        max_demand_kwh=300.0,
+        weekday_avg_kwh=290.0,
+        weekend_avg_kwh=95.0,
+    )
+
+    context = build_power_calendar_context(data)
+
+    assert "2024年10月" in context
+    assert "8,500.0 kWh" in context
+    assert "1日(火)" in context
+    assert "290.0 kWh/日" in context
+    assert "95.0 kWh/日" in context
+    assert "上位5日" in context

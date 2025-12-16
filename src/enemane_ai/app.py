@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Iterable
 import streamlit as st
 
 from enemane_ai.analyzer import (
+    CALENDAR_ANALYSIS_PROMPT,
+    CALENDAR_OUTPUT_FORMAT,
     OUTPUT_FORMAT_INSTRUCTION,
     PRESET_PROMPT,
     GeminiGraphLanguageModel,
@@ -21,10 +23,13 @@ from enemane_ai.analyzer import (
     MonthlyReportData,
     MonthlyTemperatureSummary,
     analyze_image,
+    build_power_calendar_context,
     build_supplementary_context,
     collect_graph_entries,
     parse_monthly_report_csv,
+    parse_power_30min_csv,
     parse_temperature_csv_for_comparison,
+    pdf_to_images,
 )
 
 if TYPE_CHECKING:
@@ -55,6 +60,14 @@ class OutputRow:
     graph_name: str  # 対応するグラフ名
     item_name: str  # 項目名
     ai_comment: str  # 生成するAIコメント
+
+
+@dataclass
+class CalendarAnalysisRow:
+    """電力カレンダー分析結果の1行"""
+
+    item: str  # 項目名(全体傾向、最大需要日の確認など)
+    analysis: str  # 事実+仮説
 
 
 def save_uploads_to_temp(files: Iterable["UploadedFile"], tmpdir: Path) -> list[Path]:
@@ -205,6 +218,61 @@ def parse_multi_item_response(
     return [(fallback_graph_name, "", raw_response)]
 
 
+def parse_calendar_analysis_response(raw_response: str) -> list[CalendarAnalysisRow]:
+    """
+    カレンダー分析のJSONレスポンスをCalendarAnalysisRowのリストに変換。
+
+    期待形式:
+    [{"item": "全体傾向", "analysis": "..."}, ...]
+    """
+    cleaned = strip_code_fence(raw_response)
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        # JSONパースに失敗した場合、単一項目として返す
+        return [CalendarAnalysisRow(item="分析結果", analysis=raw_response)]
+
+    if isinstance(data, list):
+        results: list[CalendarAnalysisRow] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            item_name = str(item.get("item") or "")
+            analysis = str(item.get("analysis") or "")
+            if item_name or analysis:
+                results.append(
+                    CalendarAnalysisRow(
+                        item=strip_markdown(item_name),
+                        analysis=strip_markdown(analysis),
+                    )
+                )
+        if results:
+            return results
+        return [CalendarAnalysisRow(item="分析結果", analysis=raw_response)]
+
+    if isinstance(data, dict):
+        item_name = str(data.get("item") or "分析結果")
+        analysis = str(data.get("analysis") or "")
+        return [
+            CalendarAnalysisRow(
+                item=strip_markdown(item_name),
+                analysis=strip_markdown(analysis),
+            )
+        ]
+
+    return [CalendarAnalysisRow(item="分析結果", analysis=raw_response)]
+
+
+def export_calendar_analysis_csv(rows: list[CalendarAnalysisRow]) -> bytes:
+    """カレンダー分析結果をCSVエクスポート(BOM付きUTF-8)。"""
+    buffer = StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["項目", "事実+仮説"])
+    for row in rows:
+        writer.writerow([row.item, row.analysis])
+    return ("\ufeff" + buffer.getvalue()).encode("utf-8")
+
+
 def build_image_prompt(base_prompt: str) -> str:
     return (
         f"{base_prompt}\n\n"
@@ -327,15 +395,10 @@ def check_password() -> bool:
     return False
 
 
-def main() -> None:
-    st.set_page_config(page_title="Graph Insight Uploader", layout="wide")
-
-    if not check_password():
-        return
-
-    st.title("グラフ分析ダッシュボード")
+def render_graph_analysis_tab() -> None:
+    """グラフ分析タブのUIを描画。"""
     st.caption(
-        "グラフ画像をアップロードし、月報CSV・気温データと組み合わせて" "AIコメントを生成します。"
+        "グラフ画像をアップロードし、月報CSV・気温データと組み合わせてAIコメントを生成します。"
     )
 
     # ファイルアップローダーを3つに分離
@@ -373,6 +436,7 @@ def main() -> None:
         "追加の指示",
         placeholder="例: 重要なトレンドのみを箇条書きでまとめてください。",
         height=80,
+        key="graph_additional_instructions",
     )
 
     prompt = PRESET_PROMPT
@@ -383,7 +447,7 @@ def main() -> None:
         st.info("グラフ画像を選択してください。")
         return
 
-    if st.button("分析を実行", type="primary"):
+    if st.button("分析を実行", type="primary", key="graph_analyze_button"):
         llm = resolve_gemini_client()
         if llm is None:
             return
@@ -465,7 +529,162 @@ def main() -> None:
             data=export_target_format_csv(results),
             file_name="analysis_results.csv",
             mime="text/csv",
+            key="graph_download_button",
         )
+
+
+def render_calendar_analysis_tab() -> None:
+    """電力カレンダー分析タブのUIを描画。"""
+    st.caption(
+        "電力カレンダーPDFと30分間隔電力CSVをアップロードし、"
+        "AIが事実+仮説のコメントを表形式で生成します。"
+    )
+
+    st.subheader("1. 電力カレンダーPDF")
+    calendar_pdf = st.file_uploader(
+        "電力カレンダーPDFをアップロードしてください",
+        type=["pdf"],
+        accept_multiple_files=False,
+        key="calendar_pdf",
+        help="日別の30分刻み電力使用量推移グラフが含まれるPDF",
+    )
+
+    st.subheader("2. 30分間隔電力CSV")
+    power_csv = st.file_uploader(
+        "30分間隔の電力使用量CSVをアップロードしてください",
+        type=["csv"],
+        accept_multiple_files=False,
+        key="power_csv",
+        help="形式: 日時, kWh値 (例: 2024-10-01 00:00, 4.29)",
+    )
+
+    st.subheader("3. 追加指示 (オプション)")
+    additional_instructions = st.text_area(
+        "追加の指示",
+        placeholder="例: 省エネ改善の示唆を重点的に分析してください。",
+        height=80,
+        key="calendar_additional_instructions",
+    )
+
+    if not calendar_pdf or not power_csv:
+        st.info("電力カレンダーPDFと30分間隔電力CSVの両方を選択してください。")
+        return
+
+    if st.button("分析を実行", type="primary", key="calendar_analyze_button"):
+        llm = resolve_gemini_client()
+        if llm is None:
+            return
+
+        with st.status("ファイルを準備しています...", expanded=False) as status:
+            with TemporaryDirectory() as tmpdir_str:
+                tmpdir = Path(tmpdir_str)
+
+                # PDFを保存
+                pdf_path = tmpdir / calendar_pdf.name
+                pdf_path.write_bytes(calendar_pdf.getvalue())
+
+                # CSVを保存してパース
+                csv_path = tmpdir / power_csv.name
+                csv_path.write_bytes(power_csv.getvalue())
+
+                try:
+                    calendar_data = parse_power_30min_csv(csv_path)
+                    st.info(
+                        f"電力データ読み込み: {calendar_data.year_month}, "
+                        f"月間電力使用量: {calendar_data.total_monthly_kwh:,.1f} kWh, "
+                        f"最大需要日: {calendar_data.max_demand_day}"
+                    )
+                except Exception as exc:
+                    status.update(label="失敗", state="error")
+                    st.error(f"電力CSVの読み込みに失敗しました: {exc}")
+                    return
+
+                # PDFを画像に変換
+                status.update(label="PDFを処理中...", state="running")
+                try:
+                    pdf_images = pdf_to_images(pdf_path)
+                    if not pdf_images:
+                        status.update(label="失敗", state="error")
+                        st.error("PDFから画像を抽出できませんでした。")
+                        return
+                    # 最初のページを使用
+                    _, calendar_image = pdf_images[0]
+                except Exception as exc:
+                    status.update(label="失敗", state="error")
+                    st.error(f"PDF処理に失敗しました: {exc}")
+                    return
+
+                # コンテキストを構築
+                context = build_power_calendar_context(calendar_data)
+
+                # プロンプトを構築
+                full_prompt = CALENDAR_ANALYSIS_PROMPT
+                if additional_instructions.strip():
+                    full_prompt = f"{full_prompt}\n\n{additional_instructions.strip()}"
+                full_prompt = f"{full_prompt}\n\n{context}\n\n{CALENDAR_OUTPUT_FORMAT}"
+
+                # AI分析を実行
+                status.update(label="分析中...", state="running")
+                try:
+                    raw_response = analyze_image(calendar_image, prompt=full_prompt, llm=llm)
+                    results = parse_calendar_analysis_response(raw_response)
+                except Exception as exc:
+                    status.update(label="失敗", state="error")
+                    st.error(f"分析に失敗しました: {exc}")
+                    return
+
+            status.update(label="完了", state="complete")
+
+        # 結果表示
+        st.subheader("結果")
+
+        # 分析サマリー
+        st.markdown("#### 分析サマリー")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("データ期間", calendar_data.year_month)
+        with col2:
+            st.metric("月間電力使用量", f"{calendar_data.total_monthly_kwh:,.0f} kWh")
+        with col3:
+            st.metric("最大需要日", calendar_data.max_demand_day)
+
+        col4, col5 = st.columns(2)
+        with col4:
+            st.metric("平日平均", f"{calendar_data.weekday_avg_kwh:,.1f} kWh/日")
+        with col5:
+            st.metric("休日平均", f"{calendar_data.weekend_avg_kwh:,.1f} kWh/日")
+
+        # テーブル表示
+        st.markdown("#### テーブル出力")
+        table_data = [{"項目": row.item, "事実+仮説": row.analysis} for row in results]
+        st.table(table_data)
+
+        # CSVダウンロード
+        st.download_button(
+            "CSVをダウンロード",
+            data=export_calendar_analysis_csv(results),
+            file_name="calendar_analysis_results.csv",
+            mime="text/csv",
+            key="calendar_download_button",
+        )
+
+
+def main() -> None:
+    st.set_page_config(page_title="Graph Insight Uploader", layout="wide")
+
+    if not check_password():
+        return
+
+    st.title("グラフ分析ダッシュボード")
+
+    # タブで機能を分離
+    tab1, tab2 = st.tabs(["グラフ分析", "電力カレンダー分析"])
+
+    with tab1:
+        render_graph_analysis_tab()
+
+    with tab2:
+        render_calendar_analysis_tab()
 
 
 if __name__ == "__main__":

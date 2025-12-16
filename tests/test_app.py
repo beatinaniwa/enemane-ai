@@ -5,12 +5,15 @@ from PIL import Image
 from enemane_ai.analyzer import PRESET_PROMPT
 from enemane_ai.app import (
     AnalyzedGraph,
+    CalendarAnalysisRow,
     OutputRow,
     ResultRow,
     analyze_files,
     build_result_rows,
+    export_calendar_analysis_csv,
     export_table_csv,
     export_target_format_csv,
+    parse_calendar_analysis_response,
     parse_multi_item_response,
     parse_structured_comment,
 )
@@ -206,3 +209,72 @@ def test_export_target_format_csv_has_bom_and_correct_headers() -> None:
     assert lines[0] == "対応するグラフ名,項目名,生成するAIコメント"
     assert "グラフ1,最大電力[kW],コメント1" in lines[1]
     assert "グラフ1,電力使用量[kWh],コメント2" in lines[2]
+
+
+def test_parse_calendar_analysis_response_handles_json_array() -> None:
+    raw = """```json
+[
+  {"item": "全体傾向", "analysis": "10月は電力使用量が減少傾向"},
+  {"item": "最大需要日の確認", "analysis": "22日(火)が最大需要を記録"}
+]
+```"""
+
+    results = parse_calendar_analysis_response(raw)
+
+    assert len(results) == 2
+    assert results[0].item == "全体傾向"
+    assert "10月" in results[0].analysis
+    assert results[1].item == "最大需要日の確認"
+    assert "22日" in results[1].analysis
+
+
+def test_parse_calendar_analysis_response_handles_single_object() -> None:
+    raw = '{"item": "全体傾向", "analysis": "テスト分析"}'
+
+    results = parse_calendar_analysis_response(raw)
+
+    assert len(results) == 1
+    assert results[0].item == "全体傾向"
+    assert results[0].analysis == "テスト分析"
+
+
+def test_parse_calendar_analysis_response_falls_back_on_invalid_json() -> None:
+    raw = "This is not JSON"
+
+    results = parse_calendar_analysis_response(raw)
+
+    assert len(results) == 1
+    assert results[0].item == "分析結果"
+    assert "This is not JSON" in results[0].analysis
+
+
+def test_parse_calendar_analysis_response_strips_markdown() -> None:
+    raw = """```json
+[
+  {"item": "**全体傾向**", "analysis": "電力使用量は*減少*傾向"}
+]
+```"""
+
+    results = parse_calendar_analysis_response(raw)
+
+    assert results[0].item == "全体傾向"
+    assert "**" not in results[0].item
+    assert "*" not in results[0].analysis
+
+
+def test_export_calendar_analysis_csv_has_bom_and_correct_headers() -> None:
+    rows = [
+        CalendarAnalysisRow(item="全体傾向", analysis="10月は減少傾向"),
+        CalendarAnalysisRow(item="最大需要日の確認", analysis="22日が最大"),
+    ]
+
+    csv_bytes = export_calendar_analysis_csv(rows)
+
+    # BOM付きUTF-8を確認
+    assert csv_bytes.startswith(b"\xef\xbb\xbf")
+
+    text = csv_bytes.decode("utf-8-sig")
+    lines = text.strip().splitlines()
+    assert lines[0] == "項目,事実+仮説"
+    assert "全体傾向,10月は減少傾向" in lines[1]
+    assert "最大需要日の確認,22日が最大" in lines[2]
