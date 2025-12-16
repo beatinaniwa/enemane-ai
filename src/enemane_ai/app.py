@@ -592,7 +592,8 @@ def render_calendar_analysis_tab() -> None:
                     st.info(
                         f"電力データ読み込み: {calendar_data.year_month}, "
                         f"月間電力使用量: {calendar_data.total_monthly_kwh:,.1f} kWh, "
-                        f"最大需要日: {calendar_data.max_demand_day}"
+                        f"最大電力使用量日: {calendar_data.max_usage_day}, "
+                        f"最大需要電力日: {calendar_data.max_demand_day}"
                     )
                 except Exception as exc:
                     status.update(label="失敗", state="error")
@@ -640,18 +641,30 @@ def render_calendar_analysis_tab() -> None:
 
         # 分析サマリー
         st.markdown("#### 分析サマリー")
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         with col1:
             st.metric("データ期間", calendar_data.year_month)
         with col2:
             st.metric("月間電力使用量", f"{calendar_data.total_monthly_kwh:,.0f} kWh")
-        with col3:
-            st.metric("最大需要日", calendar_data.max_demand_day)
 
-        col4, col5 = st.columns(2)
+        col3, col4 = st.columns(2)
+        with col3:
+            st.metric(
+                "最大電力使用量日",
+                calendar_data.max_usage_day,
+                help="1日の合計電力使用量(kWh)が最大の日",
+            )
         with col4:
-            st.metric("平日平均", f"{calendar_data.weekday_avg_kwh:,.1f} kWh/日")
+            st.metric(
+                "最大需要電力日",
+                calendar_data.max_demand_day,
+                help="30分間隔のピーク値(kW)が最大の日",
+            )
+
+        col5, col6 = st.columns(2)
         with col5:
+            st.metric("平日平均", f"{calendar_data.weekday_avg_kwh:,.1f} kWh/日")
+        with col6:
             st.metric("休日平均", f"{calendar_data.weekend_avg_kwh:,.1f} kWh/日")
 
         # テーブル表示

@@ -337,8 +337,12 @@ def test_parse_power_30min_csv(tmp_path: Path) -> None:
     assert day1.total_kwh == 4.29 + 4.04 + 4.08
     assert day1.max_kwh == 4.29
     assert day1.max_time == "00:00"
-    # 最大需要日
+    # 最大電力使用量日 (1日の合計が最大 = 10/1)
+    assert "1日" in data.max_usage_day
+    assert data.max_usage_kwh == 4.29 + 4.04 + 4.08
+    # 最大需要電力日 (30分ピークが最大 = 10/1の4.29kW)
     assert "1日" in data.max_demand_day
+    assert data.max_demand_kw == 4.29
     # 平日/休日平均
     assert data.weekday_avg_kwh > 0
     assert data.weekend_avg_kwh > 0
@@ -372,8 +376,10 @@ def test_build_power_calendar_context() -> None:
             ),
         ],
         total_monthly_kwh=8500.0,
+        max_usage_day="1日(火)",
+        max_usage_kwh=300.0,
         max_demand_day="1日(火)",
-        max_demand_kwh=300.0,
+        max_demand_kw=21.5,
         weekday_avg_kwh=290.0,
         weekend_avg_kwh=95.0,
     )
@@ -382,7 +388,10 @@ def test_build_power_calendar_context() -> None:
 
     assert "2024年10月" in context
     assert "8,500.0 kWh" in context
-    assert "1日(火)" in context
+    assert "最大電力使用量日: 1日(火)" in context
+    assert "300.0 kWh" in context
+    assert "最大需要電力日: 1日(火)" in context
+    assert "21.5 kW" in context
     assert "290.0 kWh/日" in context
     assert "95.0 kWh/日" in context
     assert "上位5日" in context

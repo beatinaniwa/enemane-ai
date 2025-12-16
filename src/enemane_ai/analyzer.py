@@ -107,7 +107,9 @@ CALENDAR_ANALYSIS_PROMPT = dedent(
     仮説(電力使用要因の推測)を組み合わせて記述してください。
 
     1. 全体傾向: 月全体の電力使用パターン、特徴的な傾向
-    2. 最大需要日の確認: 最大需要電力を記録した日と要因推測
+    2. 最大電力使用量日・最大需要電力日の確認: それぞれの日と要因推測
+       - 最大電力使用量日: 1日の合計電力使用量(kWh)が最大の日
+       - 最大需要電力日: 30分間隔のピーク値(kW)が最大の日
     3. 平日・休日差: 稼働日と非稼働日の消費パターンの違い
     4. 時間帯別パターン: ピーク時間帯、ベースロード
     5. 省エネ改善の示唆: 削減余地のある時間帯や日の特定
@@ -121,7 +123,7 @@ CALENDAR_OUTPUT_FORMAT = dedent(
     ```json
     [
       {"item": "全体傾向", "analysis": "事実+仮説の記述"},
-      {"item": "最大需要日の確認", "analysis": "事実+仮説の記述"},
+      {"item": "最大電力使用量日・最大需要電力日の確認", "analysis": "事実+仮説の記述"},
       {"item": "平日・休日差", "analysis": "事実+仮説の記述"},
       {"item": "時間帯別パターン", "analysis": "事実+仮説の記述"},
       {"item": "省エネ改善の示唆", "analysis": "事実+仮説の記述"}
@@ -266,8 +268,12 @@ class MonthlyPowerCalendarData:
     year_month: str  # "2024年10月"
     daily_summaries: list[DailyPowerSummary] = field(default_factory=list)
     total_monthly_kwh: float = 0.0
-    max_demand_day: str = ""  # "22日(火)"
-    max_demand_kwh: float = 0.0
+    # 最大電力使用量(1日の合計kWhが最大)
+    max_usage_day: str = ""  # "22日(火)"
+    max_usage_kwh: float = 0.0
+    # 最大需要電力(30分ピークが最大)
+    max_demand_day: str = ""  # "15日(金)"
+    max_demand_kw: float = 0.0
     weekday_avg_kwh: float = 0.0
     weekend_avg_kwh: float = 0.0
 
@@ -703,11 +709,17 @@ def parse_power_30min_csv(path: Path) -> MonthlyPowerCalendarData:
     # 月間統計を計算
     total_monthly_kwh = sum(s.total_kwh for s in daily_summaries)
 
-    # 最大需要日を特定
-    max_demand_summary = max(daily_summaries, key=lambda s: s.total_kwh)
-    dt = datetime.strptime(max_demand_summary.date, "%Y-%m-%d")
-    max_demand_day = f"{dt.day}日({max_demand_summary.day_of_week})"
-    max_demand_kwh = max_demand_summary.total_kwh
+    # 最大電力使用量日を特定(1日の合計が最大)
+    max_usage_summary = max(daily_summaries, key=lambda s: s.total_kwh)
+    dt_usage = datetime.strptime(max_usage_summary.date, "%Y-%m-%d")
+    max_usage_day = f"{dt_usage.day}日({max_usage_summary.day_of_week})"
+    max_usage_kwh = max_usage_summary.total_kwh
+
+    # 最大需要電力日を特定(30分ピークが最大)
+    max_demand_summary = max(daily_summaries, key=lambda s: s.max_kwh)
+    dt_demand = datetime.strptime(max_demand_summary.date, "%Y-%m-%d")
+    max_demand_day = f"{dt_demand.day}日({max_demand_summary.day_of_week})"
+    max_demand_kw = max_demand_summary.max_kwh
 
     # 平日/休日平均を計算 (土日を休日とみなす)
     weekday_totals = [s.total_kwh for s in daily_summaries if s.day_of_week not in ("土", "日")]
@@ -725,8 +737,10 @@ def parse_power_30min_csv(path: Path) -> MonthlyPowerCalendarData:
         year_month=year_month,
         daily_summaries=daily_summaries,
         total_monthly_kwh=total_monthly_kwh,
+        max_usage_day=max_usage_day,
+        max_usage_kwh=max_usage_kwh,
         max_demand_day=max_demand_day,
-        max_demand_kwh=max_demand_kwh,
+        max_demand_kw=max_demand_kw,
         weekday_avg_kwh=weekday_avg_kwh,
         weekend_avg_kwh=weekend_avg_kwh,
     )
@@ -738,7 +752,8 @@ def build_power_calendar_context(data: MonthlyPowerCalendarData) -> str:
 
     parts.append(f"【30分間隔電力データ({data.year_month})】")
     parts.append(f"- 月間電力使用量: {data.total_monthly_kwh:,.1f} kWh")
-    parts.append(f"- 最大需要日: {data.max_demand_day} ({data.max_demand_kwh:,.1f} kWh)")
+    parts.append(f"- 最大電力使用量日: {data.max_usage_day} ({data.max_usage_kwh:,.1f} kWh)")
+    parts.append(f"- 最大需要電力日: {data.max_demand_day} ({data.max_demand_kw:.1f} kW)")
     parts.append(f"- 平日平均: {data.weekday_avg_kwh:,.1f} kWh/日")
     parts.append(f"- 休日平均: {data.weekend_avg_kwh:,.1f} kWh/日")
 
