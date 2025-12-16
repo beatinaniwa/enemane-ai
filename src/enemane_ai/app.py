@@ -730,6 +730,10 @@ def render_article_search_tab() -> None:
     """記事検索・要約タブのUIを描画。"""
     st.caption("コラムテーマと建物タイプを選択し、適切な記事を収集してAIで要約します。")
 
+    # セッション状態の初期化
+    if "article_results" not in st.session_state:
+        st.session_state.article_results = None
+
     st.subheader("1. コラムテーマ選択")
     theme = st.selectbox(
         "検索したいコラムテーマを選択してください",
@@ -833,28 +837,35 @@ def render_article_search_tab() -> None:
 
             status.update(label="完了", state="complete")
 
-        # 結果表示
+        # 結果をセッション状態に保存
+        st.session_state.article_results = results
+
+    # 結果表示 (セッション状態から)
+    if st.session_state.article_results:
+        results = st.session_state.article_results
+
         st.subheader("結果")
-
-        if not results:
-            st.warning("要約結果がありません。")
-            return
-
         st.success(f"{len(results)}件の記事を要約しました")
 
-        # テーブル表示
-        st.markdown("#### テーブル出力")
-        table_data = [
-            {
-                "テーマ": row.theme,
-                "タイトル": row.title,
-                "本文": row.content[:100] + "..." if len(row.content) > 100 else row.content,
-                "画像": "あり" if row.image else "なし",
-                "リンク": row.link,
-            }
-            for row in results
-        ]
-        st.table(table_data)
+        # 画像付きカード形式で表示
+        st.markdown("#### 記事一覧")
+        for row in results:
+            with st.container():
+                cols = st.columns([1, 3])
+                with cols[0]:
+                    if row.image:
+                        st.image(row.image, width=150)
+                    else:
+                        st.markdown("*画像なし*")
+                with cols[1]:
+                    st.markdown(f"**{row.title}**")
+                    st.caption(f"テーマ: {row.theme}")
+                    content_preview = (
+                        row.content[:200] + "..." if len(row.content) > 200 else row.content
+                    )
+                    st.markdown(content_preview)
+                    st.markdown(f"[記事を開く]({row.link})")
+                st.divider()
 
         # CSVダウンロード
         st.download_button(
@@ -864,6 +875,11 @@ def render_article_search_tab() -> None:
             mime="text/csv",
             key="article_download_button",
         )
+
+        # 結果クリアボタン
+        if st.button("結果をクリア", key="article_clear_button"):
+            st.session_state.article_results = None
+            st.rerun()
 
 
 def main() -> None:
