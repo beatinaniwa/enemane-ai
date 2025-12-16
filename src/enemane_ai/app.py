@@ -18,7 +18,6 @@ from enemane_ai.analyzer import (
     BUILDING_TYPES,
     CALENDAR_ANALYSIS_PROMPT,
     CALENDAR_OUTPUT_FORMAT,
-    DEFAULT_MODEL_NAME,
     FLASH_MODEL_NAME,
     OUTPUT_FORMAT_INSTRUCTION,
     PRESET_PROMPT,
@@ -765,11 +764,10 @@ def render_article_search_tab() -> None:
         key="article_search_button",
         disabled=button_disabled,
     ):
-        # 判定用Flash LLM と 要約用Pro LLM を生成
+        # 判定・要約ともにFlash LLMを使用 (高速・安価)
         flash_llm = resolve_gemini_client_with_model(FLASH_MODEL_NAME)
-        pro_llm = resolve_gemini_client_with_model(DEFAULT_MODEL_NAME)
 
-        if flash_llm is None or pro_llm is None:
+        if flash_llm is None:
             return
 
         with st.status("処理中...", expanded=True) as status:
@@ -862,7 +860,7 @@ def render_article_search_tab() -> None:
                 try:
                     summary = summarize_article(
                         article.content,
-                        pro_llm,
+                        flash_llm,
                         title=article.title,
                         url=article.link,
                     )
