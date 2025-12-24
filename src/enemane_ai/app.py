@@ -32,6 +32,7 @@ from enemane_ai.analyzer import (
     build_supplementary_context,
     collect_graph_entries,
     collect_relevant_articles,
+    evaluate_summary_quality,
     parse_monthly_report_csv,
     parse_power_30min_csv,
     parse_temperature_csv_for_comparison,
@@ -997,6 +998,28 @@ def render_article_search_tab() -> None:
                 progress_bar.progress((i + 1) / len(collection_result.articles))
 
             summary_status.empty()
+
+            # Step 3: 品質評価で上位3件に絞り込み
+            if len(results) > 3:
+                status.update(label="品質評価中...", state="running")
+                quality_status = st.empty()
+                quality_status.info("📊 要約の品質を評価し、上位3件を選出中...")
+
+                # 評価用のdict形式に変換
+                summaries_for_eval = [
+                    {"theme": r.theme, "title": r.title, "content": r.content} for r in results
+                ]
+
+                # 品質評価を実行 (エラー時は先頭3件にフォールバック)
+                try:
+                    top_indices = evaluate_summary_quality(summaries_for_eval, flash_llm, top_n=3)
+                    # 上位3件のみを抽出
+                    results = [results[i] for i in top_indices if i < len(results)]
+                except Exception as exc:
+                    st.warning(f"品質評価でエラーが発生したため、先頭3件を表示します: {exc}")
+                    results = results[:3]
+
+                quality_status.empty()
 
             status.update(label="完了", state="complete")
 
