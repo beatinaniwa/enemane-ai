@@ -14,10 +14,14 @@ from typing import TYPE_CHECKING, Iterable
 import streamlit as st
 
 from enemane_ai.analyzer import (
+    AVAILABLE_ARTICLE_THEMES,
+    BUILDING_TYPES,
     CALENDAR_ANALYSIS_PROMPT,
     CALENDAR_OUTPUT_FORMAT,
+    FLASH_MODEL_NAME,
     OUTPUT_FORMAT_INSTRUCTION,
     PRESET_PROMPT,
+    ArticleProgressInfo,
     GeminiGraphLanguageModel,
     GraphLanguageModel,
     MonthlyReportData,
@@ -26,10 +30,12 @@ from enemane_ai.analyzer import (
     build_power_calendar_context,
     build_supplementary_context,
     collect_graph_entries,
+    collect_relevant_articles,
     parse_monthly_report_csv,
     parse_power_30min_csv,
     parse_temperature_csv_for_comparison,
     pdf_to_images,
+    summarize_article,
 )
 
 if TYPE_CHECKING:
@@ -68,6 +74,17 @@ class CalendarAnalysisRow:
 
     item: str  # 項目名(全体傾向、最大需要日の確認など)
     analysis: str  # 事実+仮説
+
+
+@dataclass
+class ArticleOutputRow:
+    """記事検索結果CSVの1行"""
+
+    theme: str  # テーマ
+    title: str  # タイトル
+    content: str  # 本文(要約)
+    image: str  # 画像URL
+    link: str  # リンク
 
 
 def save_uploads_to_temp(files: Iterable["UploadedFile"], tmpdir: Path) -> list[Path]:
@@ -270,6 +287,16 @@ def export_calendar_analysis_csv(rows: list[CalendarAnalysisRow]) -> bytes:
     writer.writerow(["項目", "事実+仮説"])
     for row in rows:
         writer.writerow([row.item, row.analysis])
+    return ("\ufeff" + buffer.getvalue()).encode("utf-8")
+
+
+def export_article_search_csv(rows: list[ArticleOutputRow]) -> bytes:
+    """記事検索結果をCSVエクスポート(BOM付きUTF-8)。"""
+    buffer = StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["テーマ", "タイトル", "本文", "画像", "リンク"])
+    for row in rows:
+        writer.writerow([row.theme, row.title, row.content, row.image, row.link])
     return ("\ufeff" + buffer.getvalue()).encode("utf-8")
 
 
@@ -682,6 +709,225 @@ def render_calendar_analysis_tab() -> None:
         )
 
 
+def resolve_gemini_client_with_model(
+    model_name: str,
+) -> GeminiGraphLanguageModel | None:
+    """指定モデルでGeminiクライアントを生成する。"""
+    api_key = st.secrets.get("GEMINI_API_KEY") if hasattr(st, "secrets") else None
+    api_key = api_key or os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        st.error("GEMINI_API_KEY が見つかりません。secrets.toml または環境変数に設定してください。")
+        return None
+
+    try:
+        return GeminiGraphLanguageModel(api_key=api_key, model_name=model_name)
+    except Exception as exc:
+        st.error(f"Gemini クライアント生成に失敗しました: {exc}")
+        return None
+
+
+def render_article_search_tab() -> None:
+    """記事検索・要約タブのUIを描画。"""
+    st.caption("コラムテーマと建物タイプを選択し、適切な記事を収集してAIで要約します。")
+
+    # セッション状態の初期化
+    if "article_results" not in st.session_state:
+        st.session_state.article_results = None
+
+    st.subheader("1. コラムテーマ選択")
+    theme = st.selectbox(
+        "検索したいコラムテーマを選択してください",
+        options=AVAILABLE_ARTICLE_THEMES,
+        index=0,
+        key="article_theme",
+    )
+
+    st.subheader("2. 送付先の建物タイプ (必須)")
+    st.caption("建物タイプを選択すると、その建物タイプの担当者に適した記事のみを収集します")
+    building_types = st.multiselect(
+        "建物タイプを選択",
+        options=BUILDING_TYPES,
+        default=[],
+        key="article_building_types",
+    )
+
+    # 建物タイプ未選択時の警告
+    if not building_types:
+        st.warning("建物タイプを1つ以上選択してください")
+
+    # 建物タイプが選択されている場合のみボタンを有効化
+    button_disabled = len(building_types) == 0
+
+    if st.button(
+        "検索・要約を実行",
+        type="primary",
+        key="article_search_button",
+        disabled=button_disabled,
+    ):
+        # 判定・要約ともにFlash LLMを使用 (高速・安価)
+        flash_llm = resolve_gemini_client_with_model(FLASH_MODEL_NAME)
+
+        if flash_llm is None:
+            return
+
+        with st.status("処理中...", expanded=True) as status:
+            # Step 1: 適切な記事を収集 (Flashで判定)
+            status.update(label="記事を収集・判定中...", state="running")
+
+            # 進捗表示用のプレースホルダー
+            progress_header = st.empty()
+            query_display = st.empty()
+            article_log = st.empty()
+            log_entries: list[str] = []
+
+            def on_progress(info: ArticleProgressInfo) -> None:
+                """進捗コールバック"""
+                # ヘッダー更新
+                progress_header.markdown(
+                    f"**収集状況:** {info.total_collected}/{info.target_count}件 "
+                    f"(検索: {info.total_searched}, 判定: {info.total_judged})"
+                )
+
+                if info.event == "query_start":
+                    query_display.info(f"🔍 検索クエリ: {info.query}")
+                elif info.event == "article_found":
+                    # 最新の記事を表示
+                    query_display.info(f"📄 取得中: {info.title[:50]}...")
+                elif info.event == "article_judged":
+                    # 判定結果をログに追加
+                    if info.is_relevant:
+                        icon = "✅"
+                        result_text = "適切"
+                    else:
+                        icon = "❌"
+                        result_text = "不適切"
+                    # タイトルと理由を改行して表示
+                    log_entry = f"{icon} **[{result_text}]** {info.title}\n" f"   └ {info.reason}\n"
+                    log_entries.append(log_entry)
+                    # 全件を表示
+                    article_log.markdown("\n".join(log_entries))
+
+            try:
+                collection_result = collect_relevant_articles(
+                    theme=theme,
+                    building_types=building_types,
+                    flash_llm=flash_llm,
+                    target_count=20,
+                    max_search_attempts=10,
+                    progress_callback=on_progress,
+                )
+            except Exception as exc:
+                status.update(label="失敗", state="error")
+                st.error(f"記事収集に失敗しました: {exc}")
+                return
+
+            # 収集統計を表示
+            stopped_reason_ja = {
+                "target_reached": "目標達成",
+                "max_attempts": "検索上限",
+                "no_more_results": "結果なし",
+            }.get(collection_result.stopped_reason, collection_result.stopped_reason)
+
+            # プレースホルダーをクリアして最終結果を表示
+            progress_header.empty()
+            query_display.empty()
+            article_log.empty()
+
+            st.success(
+                f"収集完了: 検索 {collection_result.total_searched}件 → "
+                f"判定 {collection_result.total_judged}件 → "
+                f"適切 {len(collection_result.articles)}件 "
+                f"({stopped_reason_ja})"
+            )
+
+            if not collection_result.articles:
+                status.update(label="完了", state="complete")
+                st.warning("適切な記事が見つかりませんでした。")
+                return
+
+            # Step 2: 適切な記事を要約 (Proで要約)
+            status.update(label="記事を要約中...", state="running")
+            results: list[ArticleOutputRow] = []
+            progress_bar = st.progress(0)
+            summary_status = st.empty()
+
+            for i, article in enumerate(collection_result.articles):
+                # 要約中の記事を表示
+                summary_status.info(
+                    f"📝 要約中 ({i + 1}/{len(collection_result.articles)}): "
+                    f"{article.title[:50]}..."
+                )
+                try:
+                    summary = summarize_article(
+                        article.content,
+                        flash_llm,
+                        title=article.title,
+                        url=article.link,
+                    )
+                    results.append(
+                        ArticleOutputRow(
+                            theme=theme,
+                            title=article.title,
+                            content=summary,
+                            image=article.og_image,
+                            link=article.link,
+                        )
+                    )
+                except Exception as exc:
+                    st.warning(f"要約エラー ({article.link}): {exc}")
+
+                progress_bar.progress((i + 1) / len(collection_result.articles))
+
+            summary_status.empty()
+
+            status.update(label="完了", state="complete")
+
+        # 結果をセッション状態に保存
+        st.session_state.article_results = results
+
+    # 結果表示 (セッション状態から)
+    if st.session_state.article_results:
+        results = st.session_state.article_results
+
+        st.subheader("結果")
+        st.success(f"{len(results)}件の記事を要約しました")
+
+        # 画像付きカード形式で表示
+        st.markdown("#### 記事一覧")
+        for row in results:
+            with st.container():
+                cols = st.columns([1, 3])
+                with cols[0]:
+                    # 画像URLが完全なURLかチェック (相対パスはエラーになる)
+                    if row.image and row.image.startswith(("http://", "https://")):
+                        try:
+                            st.image(row.image, width=150)
+                        except Exception:
+                            st.markdown("*画像読込エラー*")
+                    else:
+                        st.markdown("*画像なし*")
+                with cols[1]:
+                    st.markdown(f"**{row.title}**")
+                    st.caption(f"テーマ: {row.theme}")
+                    st.markdown(row.content)
+                    st.markdown(f"[記事を開く]({row.link})")
+                st.divider()
+
+        # CSVダウンロード
+        st.download_button(
+            "CSVをダウンロード",
+            data=export_article_search_csv(results),
+            file_name="article_search_results.csv",
+            mime="text/csv",
+            key="article_download_button",
+        )
+
+        # 結果クリアボタン
+        if st.button("結果をクリア", key="article_clear_button"):
+            st.session_state.article_results = None
+            st.rerun()
+
+
 def main() -> None:
     st.set_page_config(page_title="Graph Insight Uploader", layout="wide")
 
@@ -690,14 +936,17 @@ def main() -> None:
 
     st.title("グラフ分析ダッシュボード")
 
-    # タブで機能を分離
-    tab1, tab2 = st.tabs(["グラフ分析", "電力カレンダー分析"])
+    # タブで機能を分離 (3つに拡張)
+    tab1, tab2, tab3 = st.tabs(["グラフ分析", "電力カレンダー分析", "記事検索・要約"])
 
     with tab1:
         render_graph_analysis_tab()
 
     with tab2:
         render_calendar_analysis_tab()
+
+    with tab3:
+        render_article_search_tab()
 
 
 if __name__ == "__main__":

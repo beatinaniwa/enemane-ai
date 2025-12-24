@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import re
 from collections import defaultdict
@@ -8,9 +9,12 @@ from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 from textwrap import dedent
-from typing import Iterable, Protocol, Sequence, cast
+from typing import Callable, Iterable, Protocol, Sequence, cast
 
 import pypdfium2 as pdfium
+import requests
+from bs4 import BeautifulSoup
+from ddgs import DDGS
 from google import genai
 from google.genai import types as genai_types
 from PIL import Image
@@ -773,3 +777,639 @@ def build_power_calendar_context(data: MonthlyPowerCalendarData) -> str:
         )
 
     return "\n".join(parts)
+
+
+# =============================================================================
+# 記事検索・要約機能
+# =============================================================================
+
+
+@dataclass
+class ArticleFetchResult:
+    """ページ取得結果"""
+
+    title: str
+    content: str
+    og_image: str
+    link: str
+    og_type: str  # "article", "website" など
+
+
+ARTICLE_SUMMARIZATION_PROMPT = dedent(
+    """
+    あなたは、公開ブログ向けに合法性へ配慮して要約するライターです。
+    下記の文章を、以下の制約を満たすよう要約してください。
+
+    #制約
+
+    表現の独自化: 事実・主張・根拠を高い抽象度で再記述し、
+    原文の決まり文句や比喩・見出し・段落構成を踏襲しない。連続7語以上の一致を禁止。
+
+    再構成: 要点ごとに並べ替え可。原文特有の具体例や固有のリストは一般化する。
+
+    自己チェック: 生成後に語句の類似が強い箇所をさらに抽象化して言い換える。
+
+    #出力形式
+
+    要約本文: 約[300-600]字、敬体、独自表現。
+
+    出典
+    - タイトル: [元記事タイトル]
+    - URL: [元記事URL]
+    - 著者: [著者名。不明な場合は省略]
+    """
+)
+
+
+def is_likely_article_url(url: str) -> bool:
+    """
+    URLパターンから記事ページの可能性を判定する。
+
+    Args:
+        url: 判定対象のURL
+
+    Returns:
+        bool: 記事ページの可能性が高い場合True
+    """
+    # 優先パターン (記事ページ) - 先にチェック
+    article_patterns = [
+        r"/article/",
+        r"/column/",
+        r"/blog/",
+        r"/news/",
+        r"/post/",
+        r"/entry/",
+        r"/\d{4}/\d{2}/",  # 日付パターン (例: /2024/01/)
+    ]
+
+    # 優先パターンに一致したら True (除外パターンより優先)
+    for pattern in article_patterns:
+        if re.search(pattern, url):
+            return True
+
+    # 除外パターン (トップページ、カテゴリページなど)
+    exclude_patterns = [
+        r"^https?://[^/]+/?$",  # トップページのみ (ドメイン直下)
+        r"/category/",  # カテゴリページ
+        r"/tag/",  # タグページ
+        r"/archive/",  # アーカイブページ
+        r"/search",  # 検索結果
+        r"/page/\d+",  # ページネーション
+        r"/author/",  # 著者一覧
+    ]
+
+    # 除外パターンに一致したら False
+    for pattern in exclude_patterns:
+        if re.search(pattern, url):
+            return False
+
+    # どちらにも該当しない場合は True (フィルタしすぎを防ぐ)
+    return True
+
+
+def fetch_page_content(url: str, timeout: int = 10) -> ArticleFetchResult:
+    """
+    URLからページ本文とog:imageを取得する。
+
+    Args:
+        url: 取得対象のURL
+        timeout: タイムアウト秒数
+
+    Returns:
+        ArticleFetchResult: 取得結果
+
+    Raises:
+        requests.RequestException: ページ取得に失敗した場合
+    """
+    # 一般的なブラウザのUser-Agentを使用 (ボットブロック回避)
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    }
+
+    response = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+    response.raise_for_status()
+
+    # エンコーディング処理
+    response.encoding = response.apparent_encoding or "utf-8"
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    # タイトル取得
+    title = ""
+    title_tag = soup.find("title")
+    if title_tag:
+        title = title_tag.get_text(strip=True)
+
+    # og:image取得 (property属性とname属性の両方を試行)
+    og_image = ""
+    og_image_tag = soup.find("meta", property="og:image")
+    if not og_image_tag:
+        og_image_tag = soup.find("meta", attrs={"name": "og:image"})
+    if not og_image_tag:
+        # Twitter Cardのimage
+        og_image_tag = soup.find("meta", attrs={"name": "twitter:image"})
+    if og_image_tag and hasattr(og_image_tag, "get"):
+        img_content = og_image_tag.get("content")
+        if img_content:
+            og_image = str(img_content)
+
+    # og:type取得 (記事判定に使用)
+    og_type = ""
+    og_type_tag = soup.find("meta", property="og:type")
+    if og_type_tag and hasattr(og_type_tag, "get"):
+        type_content = og_type_tag.get("content")
+        if type_content:
+            og_type = str(type_content)
+
+    # 本文取得 (複数の方法を試行)
+    content = ""
+
+    # 方法1: article タグ
+    article = soup.find("article")
+    if article:
+        content = article.get_text(separator="\n", strip=True)
+
+    # 方法2: main タグ
+    if not content:
+        main = soup.find("main")
+        if main:
+            content = main.get_text(separator="\n", strip=True)
+
+    # 方法3: body全体からscript/styleを除去
+    if not content:
+        body = soup.find("body")
+        if body and hasattr(body, "find_all"):
+            for tag in body.find_all(["script", "style", "nav", "footer", "header"]):
+                tag.decompose()
+            content = body.get_text(separator="\n", strip=True)
+
+    # 長すぎる場合は切り詰め (Geminiの入力制限を考慮)
+    max_content_length = 10000
+    if len(content) > max_content_length:
+        content = content[:max_content_length] + "..."
+
+    return ArticleFetchResult(
+        title=title,
+        content=content,
+        og_image=og_image,
+        link=url,
+        og_type=og_type,
+    )
+
+
+def summarize_article(
+    content: str,
+    llm: GraphLanguageModel,
+    *,
+    title: str = "",
+    url: str = "",
+    author: str = "",
+) -> str:
+    """
+    記事本文をGeminiで要約する。
+
+    Args:
+        content: 記事本文
+        llm: Geminiクライアント
+        title: 元記事タイトル
+        url: 元記事URL
+        author: 著者名 (不明な場合は空文字)
+
+    Returns:
+        str: 要約文
+    """
+    input_parts = [
+        "#入力内容",
+        f"元記事タイトル: {title}" if title else "",
+        f"元記事URL: {url}" if url else "",
+        f"著者: {author}" if author else "",
+        "",
+        "入力本文:",
+        content,
+    ]
+    input_section = "\n".join(part for part in input_parts if part or part == "")
+    prompt = f"{ARTICLE_SUMMARIZATION_PROMPT}\n\n{input_section}"
+    return llm.comment_on_text(content, prompt)
+
+
+@dataclass
+class DuckDuckGoSearchResult:
+    """DuckDuckGo検索結果"""
+
+    title: str
+    url: str
+    body: str  # スニペット
+
+
+# コラムテーマ種別
+ARTICLE_THEME_LAW = "法令改正"
+ARTICLE_THEME_TREND = "社会トレンド"
+ARTICLE_THEME_CASE = "他社事例"
+ARTICLE_THEME_ADVANCED = "先進事例"
+ARTICLE_THEME_BEHAVIOR = "従業員行動改善"
+
+# テーマ別の検索クエリテンプレート
+THEME_SEARCH_QUERIES: dict[str, list[str]] = {
+    ARTICLE_THEME_LAW: [
+        "省エネ法 改正 2025 解説 資源エネルギー庁",
+        "建築物省エネ法 改正 解説 国交省",
+        "法令概要 企業向け 資料",
+    ],
+    ARTICLE_THEME_TREND: [
+        "ESG 情報開示 日本 最新ガイドライン",
+        "脱炭素 企業 動向",
+        "再エネ 導入 トレンド 企業",
+        "サステナビリティ開示 義務化 日本",
+    ],
+    ARTICLE_THEME_CASE: [
+        "省エネ 事例 製造業 導入例",
+        "企業 省エネ 導入 成功事例 LED 空調 太陽光",
+        "EMS 導入 企業 事例 日本",
+        "環境省 補助金 活用事例",
+    ],
+    ARTICLE_THEME_ADVANCED: [
+        "省エネ 先進事例 企業",
+        "再エネ 先進的 取り組み 企業",
+        "カーボンニュートラル 先進企業 事例",
+        "ZEB ZEH 先進事例",
+    ],
+    ARTICLE_THEME_BEHAVIOR: [
+        "従業員 省エネ 行動 改善",
+        "オフィス 省エネ 従業員 意識",
+        "企業 省エネ 社員教育 事例",
+        "エコアクション 従業員参加",
+    ],
+}
+
+# 利用可能なテーマ一覧
+AVAILABLE_ARTICLE_THEMES = list(THEME_SEARCH_QUERIES.keys())
+
+# 建物タイプ一覧
+BUILDING_TYPES = ["オフィス", "自治体施設", "工場", "介護福祉施設"]
+
+# 記事適切性判定用モデル (高速・安価)
+FLASH_MODEL_NAME = "gemini-2.5-flash"
+
+# 適切性判定プロンプト
+ARTICLE_RELEVANCE_PROMPT = dedent(
+    """
+    あなたは省エネ・環境関連の記事の適切性を判定するエキスパートです。
+
+    以下の記事が、指定された建物タイプの担当者にとって
+    有益で適切な内容かどうかを判定してください。
+
+    #建物タイプ
+    {building_type}
+
+    #判定基準
+    1. 建物タイプに関連する省エネ・環境対策の情報が含まれている
+    2. 実用的なアクションや知見が得られる
+    3. 広告・宣伝目的ではなく、情報提供を目的としている
+    4. 日本国内で適用可能な内容である
+
+    #出力形式
+    以下のJSON形式のみで出力してください(他の文章は不要):
+    {{"is_relevant": true または false, "reason": "判定理由を50文字以内で"}}
+
+    #入力記事
+    タイトル: {title}
+    URL: {url}
+    本文:
+    {content}
+    """
+)
+
+
+@dataclass
+class ArticleRelevanceResult:
+    """記事適切性判定結果"""
+
+    is_relevant: bool
+    reason: str
+    url: str
+    title: str
+
+
+@dataclass
+class ArticleCollectionResult:
+    """記事収集結果"""
+
+    articles: list[ArticleFetchResult]
+    relevance_results: list[ArticleRelevanceResult]
+    total_searched: int
+    total_judged: int
+    stopped_reason: str  # "target_reached" / "max_attempts" / "no_more_results"
+
+
+def judge_article_relevance(
+    content: str,
+    title: str,
+    url: str,
+    building_type: str,
+    llm: GraphLanguageModel,
+) -> ArticleRelevanceResult:
+    """
+    記事が対象建物タイプにとって適切かを判定する。
+
+    Args:
+        content: 記事本文
+        title: 記事タイトル
+        url: 記事URL
+        building_type: 建物タイプ (オフィス/自治体施設/工場/介護福祉施設)
+        llm: Gemini Flash クライアント
+
+    Returns:
+        ArticleRelevanceResult: 判定結果
+    """
+    # コンテンツを適切な長さに切り詰め (判定にはフル本文不要、コスト削減)
+    truncated_content = content[:3000] if len(content) > 3000 else content
+
+    prompt = ARTICLE_RELEVANCE_PROMPT.format(
+        building_type=building_type,
+        title=title,
+        url=url,
+        content=truncated_content,
+    )
+
+    # プロンプトに記事内容が既に含まれているため、textは空文字列を渡す
+    # (二重送信によるトークン使用量の増加を防ぐ)
+    response = llm.comment_on_text("", prompt)
+
+    # JSON解析
+    try:
+        # コードフェンスを除去
+        cleaned = response.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.split("\n")
+            # 最初と最後の```行を除去
+            lines = [line for line in lines if not line.strip().startswith("```")]
+            cleaned = "\n".join(lines)
+
+        data = json.loads(cleaned)
+        return ArticleRelevanceResult(
+            is_relevant=bool(data.get("is_relevant", False)),
+            reason=str(data.get("reason", "")),
+            url=url,
+            title=title,
+        )
+    except (json.JSONDecodeError, KeyError):
+        # パース失敗時はフォールスルー (適切と判定して収集を継続)
+        return ArticleRelevanceResult(
+            is_relevant=True,
+            reason="判定不能のため通過",
+            url=url,
+            title=title,
+        )
+
+
+def search_with_duckduckgo(
+    theme: str,
+    target: str | None = None,
+    max_results: int = 10,
+) -> list[DuckDuckGoSearchResult]:
+    """
+    DuckDuckGoで記事を検索する。
+
+    Args:
+        theme: 検索テーマ (法令改正/社会トレンド/他社事例/先進事例/従業員行動改善)
+        target: 送付先の属性 (検索キーワードに追加)
+        max_results: 最大取得件数
+
+    Returns:
+        list[DuckDuckGoSearchResult]: 検索結果のリスト
+    """
+    ddgs = DDGS()
+    all_results: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+
+    # テーマに対応する検索クエリを取得
+    search_queries = THEME_SEARCH_QUERIES.get(theme, [f"{theme} コラム 記事"])
+
+    # 各クエリで検索し、結果をマージ
+    results_per_query = max(max_results // len(search_queries), 3)
+
+    for query in search_queries:
+        # ターゲットが指定されている場合はクエリに追加
+        if target and target.strip():
+            query = f"{target} {query}"
+
+        try:
+            results = ddgs.text(
+                query,
+                region="jp-jp",
+                max_results=results_per_query,
+            )
+            for r in results:
+                url = r.get("href", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    all_results.append(r)
+        except Exception:
+            # 個別クエリの失敗は無視して続行
+            continue
+
+        # 十分な結果が得られたら終了
+        if len(all_results) >= max_results:
+            break
+
+    # 最大件数に制限
+    all_results = all_results[:max_results]
+
+    return [
+        DuckDuckGoSearchResult(
+            title=r.get("title", ""),
+            url=r.get("href", ""),
+            body=r.get("body", ""),
+        )
+        for r in all_results
+    ]
+
+
+@dataclass
+class ArticleProgressInfo:
+    """記事収集の進捗情報"""
+
+    event: str  # "query_start" / "article_found" / "article_judged"
+    query: str  # 現在の検索クエリ
+    title: str  # 記事タイトル
+    url: str  # 記事URL
+    is_relevant: bool | None  # 適切性判定結果 (None=未判定)
+    reason: str  # 判定理由
+    total_searched: int  # 検索した記事数
+    total_judged: int  # 判定した記事数
+    total_collected: int  # 収集した記事数
+    target_count: int  # 目標記事数
+
+
+def collect_relevant_articles(
+    theme: str,
+    building_types: list[str],
+    flash_llm: GraphLanguageModel,
+    target_count: int = 20,
+    max_search_attempts: int = 10,
+    progress_callback: Callable[[ArticleProgressInfo], None] | None = None,
+) -> ArticleCollectionResult:
+    """
+    適切な記事を指定件数集まるまで収集する。
+
+    Args:
+        theme: 検索テーマ
+        building_types: 建物タイプのリスト
+        flash_llm: Gemini Flash クライアント (判定用)
+        target_count: 目標記事数 (デフォルト20)
+        max_search_attempts: 最大検索回数 (無限ループ防止)
+        progress_callback: 進捗コールバック (ArticleProgressInfo)
+
+    Returns:
+        ArticleCollectionResult: 収集結果
+    """
+    collected_articles: list[ArticleFetchResult] = []
+    all_relevance_results: list[ArticleRelevanceResult] = []
+    seen_urls: set[str] = set()
+    total_searched = 0
+    total_judged = 0
+
+    # 建物タイプをコンテキストとして結合
+    building_context = "、".join(building_types)
+
+    # テーマに対応する検索クエリを取得
+    search_queries = THEME_SEARCH_QUERIES.get(theme, [f"{theme} コラム 記事"])
+
+    # 各クエリで順番に検索
+    for attempt, query in enumerate(search_queries):
+        if attempt >= max_search_attempts:
+            break
+
+        if len(collected_articles) >= target_count:
+            break
+
+        # ターゲット (建物タイプ) をクエリに追加
+        full_query = f"{building_context} {query}"
+
+        # クエリ開始を通知
+        if progress_callback:
+            progress_callback(
+                ArticleProgressInfo(
+                    event="query_start",
+                    query=full_query,
+                    title="",
+                    url="",
+                    is_relevant=None,
+                    reason="",
+                    total_searched=total_searched,
+                    total_judged=total_judged,
+                    total_collected=len(collected_articles),
+                    target_count=target_count,
+                )
+            )
+
+        try:
+            ddgs = DDGS()
+            results = ddgs.text(
+                full_query,
+                region="jp-jp",
+                max_results=20,
+            )
+        except Exception:
+            continue
+
+        for r in results:
+            url = r.get("href", "")
+            if not url or url in seen_urls:
+                continue
+
+            seen_urls.add(url)
+            total_searched += 1
+            title = r.get("title", "")
+
+            # 記事発見を通知
+            if progress_callback:
+                progress_callback(
+                    ArticleProgressInfo(
+                        event="article_found",
+                        query=full_query,
+                        title=title,
+                        url=url,
+                        is_relevant=None,
+                        reason="取得中...",
+                        total_searched=total_searched,
+                        total_judged=total_judged,
+                        total_collected=len(collected_articles),
+                        target_count=target_count,
+                    )
+                )
+
+            # URLパターンフィルタリング
+            if not is_likely_article_url(url):
+                continue
+
+            # ページ取得
+            try:
+                fetch_result = fetch_page_content(url, timeout=10)
+            except Exception:
+                continue
+
+            # コンテンツ長チェック (最小300文字)
+            if len(fetch_result.content) < 300:
+                continue
+
+            total_judged += 1
+
+            # 適切性判定
+            relevance = judge_article_relevance(
+                content=fetch_result.content,
+                title=fetch_result.title or title,
+                url=url,
+                building_type=building_context,
+                llm=flash_llm,
+            )
+            all_relevance_results.append(relevance)
+
+            # 判定結果を通知
+            if progress_callback:
+                progress_callback(
+                    ArticleProgressInfo(
+                        event="article_judged",
+                        query=full_query,
+                        title=fetch_result.title or title,
+                        url=url,
+                        is_relevant=relevance.is_relevant,
+                        reason=relevance.reason,
+                        total_searched=total_searched,
+                        total_judged=total_judged,
+                        total_collected=(
+                            len(collected_articles) + 1
+                            if relevance.is_relevant
+                            else len(collected_articles)
+                        ),
+                        target_count=target_count,
+                    )
+                )
+
+            if relevance.is_relevant:
+                collected_articles.append(fetch_result)
+
+                if len(collected_articles) >= target_count:
+                    return ArticleCollectionResult(
+                        articles=collected_articles,
+                        relevance_results=all_relevance_results,
+                        total_searched=total_searched,
+                        total_judged=total_judged,
+                        stopped_reason="target_reached",
+                    )
+
+    # ループ終了 (目標未達またはクエリ枯渇)
+    stopped_reason = "max_attempts" if total_searched > 0 else "no_more_results"
+    return ArticleCollectionResult(
+        articles=collected_articles,
+        relevance_results=all_relevance_results,
+        total_searched=total_searched,
+        total_judged=total_judged,
+        stopped_reason=stopped_reason,
+    )
