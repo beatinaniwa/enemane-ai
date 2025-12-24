@@ -100,6 +100,7 @@ CALENDAR_ANALYSIS_PROMPT = dedent(
     """
     あなたは電力管理の上級アナリストです。
     入力は【電力カレンダーPDF画像】と【30分間隔電力使用量データ】です。
+    任意で【前年同月の電力データ】と【気温データ】が含まれます。
 
     ■ 分析対象
     - PDFのグラフ部分のみを分析対象とする
@@ -111,12 +112,24 @@ CALENDAR_ANALYSIS_PROMPT = dedent(
     仮説(電力使用要因の推測)を組み合わせて記述してください。
 
     1. 全体傾向: 月全体の電力使用パターン、特徴的な傾向
+       - 前年データがある場合: 前年同月比の増減と主要因を推測
     2. 最大電力使用量日・最大需要電力日の確認: それぞれの日と要因推測
        - 最大電力使用量日: 1日の合計電力使用量(kWh)が最大の日
        - 最大需要電力日: 30分間隔のピーク値(kW)が最大の日
+       - 前年データがある場合: 前年同日との比較
     3. 平日・休日差: 稼働日と非稼働日の消費パターンの違い
+       - 前年データがある場合: 前年との平日/休日平均の比較
     4. 時間帯別パターン: ピーク時間帯、ベースロード
     5. 省エネ改善の示唆: 削減余地のある時間帯や日の特定
+       - 前年比で増加している場合はその要因分析を含める
+
+    ■ 気温データとの相関【重要】
+    【気温データ】が提供されている場合は、必ず以下のように気温と電力消費の関係をコメントに含める:
+    - 気温が高い/低い日にピークが発生した可能性を言及
+    - 気温差(前年比○℃)による冷暖房負荷の増減を言及
+    - 電力使用量の増減が気温要因か、その他要因かを推測
+      例: 「前年同月比で平均気温+2.1℃となった気温差による冷房設備の
+           負荷増大が電力使用量増加の主要因である可能性があります」
     """
 )
 
@@ -126,17 +139,19 @@ CALENDAR_OUTPUT_FORMAT = dedent(
 
     ```json
     [
-      {"item": "全体傾向", "analysis": "事実+仮説の記述"},
+      {"item": "全体傾向", "analysis": "事実+仮説の記述 (前年比較・気温相関を含む)"},
       {"item": "最大電力使用量日・最大需要電力日の確認", "analysis": "事実+仮説の記述"},
-      {"item": "平日・休日差", "analysis": "事実+仮説の記述"},
+      {"item": "平日・休日差", "analysis": "事実+仮説の記述 (前年比較を含む)"},
       {"item": "時間帯別パターン", "analysis": "事実+仮説の記述"},
-      {"item": "省エネ改善の示唆", "analysis": "事実+仮説の記述"}
+      {"item": "省エネ改善の示唆", "analysis": "事実+仮説の記述 (気温要因の考慮を含む)"}
     ]
     ```
 
     ■ 記述ルール
     - 各項目は2-4文で簡潔に
-    - 具体的な数値(日付、kWh、時刻)を必ず含める
+    - 具体的な数値(日付、kWh、時刻、気温差)を必ず含める
+    - 前年データがある場合は前年比(%)を必ず含める
+    - 気温データがある場合は気温との相関を必ず含める
     - 事実と仮説を自然な文章で接続する(ラベル表記禁止)
     - 推測で数値を作らない。読めない値は「不明」とする
     """
@@ -774,6 +789,111 @@ def build_power_calendar_context(data: MonthlyPowerCalendarData) -> str:
         day_label = f"{dt_obj.day}日({s.day_of_week})"
         parts.append(
             f"- {day_label}: {s.total_kwh:,.1f} kWh (最大 {s.max_kwh:.1f} kWh @ {s.max_time})"
+        )
+
+    return "\n".join(parts)
+
+
+def build_power_calendar_extended_context(
+    curr_power: MonthlyPowerCalendarData,
+    prev_power: MonthlyPowerCalendarData | None = None,
+    temperature: tuple[MonthlyTemperatureSummary, MonthlyTemperatureSummary] | None = None,
+) -> str:
+    """
+    電力カレンダー分析用の拡張コンテキスト文字列を構築。
+
+    前年データおよび気温データを含めた包括的なコンテキストを生成する。
+
+    Args:
+        curr_power: 当年の電力データ
+        prev_power: 前年の電力データ (オプション)
+        temperature: 気温データ (前年, 当年) のタプル (オプション)
+
+    Returns:
+        str: プロンプト用のコンテキスト文字列
+    """
+    from datetime import datetime
+
+    parts: list[str] = []
+
+    # 当年電力データ
+    parts.append(f"【当年30分間隔電力データ({curr_power.year_month})】")
+    parts.append(f"- 月間電力使用量: {curr_power.total_monthly_kwh:,.1f} kWh")
+    parts.append(
+        f"- 最大電力使用量日: {curr_power.max_usage_day} ({curr_power.max_usage_kwh:,.1f} kWh)"
+    )
+    parts.append(
+        f"- 最大需要電力日: {curr_power.max_demand_day} ({curr_power.max_demand_kw:.1f} kW)"
+    )
+    parts.append(f"- 平日平均: {curr_power.weekday_avg_kwh:,.1f} kWh/日")
+    parts.append(f"- 休日平均: {curr_power.weekend_avg_kwh:,.1f} kWh/日")
+
+    if curr_power.weekday_avg_kwh > 0 and curr_power.weekend_avg_kwh > 0:
+        ratio = curr_power.weekday_avg_kwh / curr_power.weekend_avg_kwh
+        parts.append(f"- 平日/休日比: {ratio:.2f}倍")
+
+    # 当年電力使用量 上位5日
+    parts.append("")
+    parts.append("【当年電力使用量 上位5日】")
+    sorted_days = sorted(curr_power.daily_summaries, key=lambda s: s.total_kwh, reverse=True)[:5]
+    for s in sorted_days:
+        dt_obj = datetime.strptime(s.date, "%Y-%m-%d")
+        day_label = f"{dt_obj.day}日({s.day_of_week})"
+        parts.append(
+            f"- {day_label}: {s.total_kwh:,.1f} kWh (最大 {s.max_kwh:.1f} kW @ {s.max_time})"
+        )
+
+    # 前年電力データ (存在する場合)
+    if prev_power:
+        parts.append("")
+        parts.append(f"【前年30分間隔電力データ({prev_power.year_month})】")
+        parts.append(f"- 月間電力使用量: {prev_power.total_monthly_kwh:,.1f} kWh")
+        parts.append(
+            f"- 最大電力使用量日: {prev_power.max_usage_day} ({prev_power.max_usage_kwh:,.1f} kWh)"
+        )
+        parts.append(
+            f"- 最大需要電力日: {prev_power.max_demand_day} ({prev_power.max_demand_kw:.1f} kW)"
+        )
+        parts.append(f"- 平日平均: {prev_power.weekday_avg_kwh:,.1f} kWh/日")
+        parts.append(f"- 休日平均: {prev_power.weekend_avg_kwh:,.1f} kWh/日")
+
+        # 前年比較
+        parts.append("")
+        parts.append("【前年比較】")
+        power_diff = curr_power.total_monthly_kwh - prev_power.total_monthly_kwh
+        power_pct = (
+            (power_diff / prev_power.total_monthly_kwh * 100)
+            if prev_power.total_monthly_kwh > 0
+            else 0
+        )
+        parts.append(f"- 月間電力使用量: {power_diff:+,.1f} kWh ({power_pct:+.1f}%)")
+
+        weekday_diff = curr_power.weekday_avg_kwh - prev_power.weekday_avg_kwh
+        weekend_diff = curr_power.weekend_avg_kwh - prev_power.weekend_avg_kwh
+        parts.append(f"- 平日平均差: {weekday_diff:+,.1f} kWh/日")
+        parts.append(f"- 休日平均差: {weekend_diff:+,.1f} kWh/日")
+
+    # 気温データ
+    if temperature:
+        prev_temp, curr_temp = temperature
+        parts.append("")
+        parts.append("【気温データ】")
+
+        # 前年気温
+        prev_label = prev_temp.year_month.replace("-", "年") + "月"
+        parts.append(
+            f"- {prev_label}: 最高{prev_temp.max_temp:.1f}℃, "
+            f"最低{prev_temp.min_temp:.1f}℃, 平均{prev_temp.avg_temp:.1f}℃"
+        )
+
+        # 当年気温
+        curr_label = curr_temp.year_month.replace("-", "年") + "月"
+        max_diff = curr_temp.max_temp - prev_temp.max_temp
+        avg_diff = curr_temp.avg_temp - prev_temp.avg_temp
+        parts.append(
+            f"- {curr_label}: 最高{curr_temp.max_temp:.1f}℃, "
+            f"最低{curr_temp.min_temp:.1f}℃, 平均{curr_temp.avg_temp:.1f}℃ "
+            f"(前年比 最高{max_diff:+.1f}℃, 平均{avg_diff:+.1f}℃)"
         )
 
     return "\n".join(parts)
