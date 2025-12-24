@@ -1118,6 +1118,90 @@ def summarize_article(
     return llm.comment_on_text(content, prompt)
 
 
+SUMMARY_QUALITY_EVALUATION_PROMPT = dedent(
+    """
+    あなたは省エネ・環境対策に関する記事要約の品質を評価する専門家です。
+    以下の要約リストを評価し、各要約に1〜10のスコアを付けてください。
+
+    ## 評価基準
+    1. 情報の具体性・実用性 (省エネ施策として役立つ具体的な情報があるか)
+    2. 内容の新規性・独自性 (一般論ではなく独自の知見があるか)
+    3. 要約の読みやすさ・まとまり (文章として整っているか)
+    4. 建物タイプへの関連性 (対象建物で実践可能な内容か)
+
+    ## 出力形式
+    必ず以下のJSON配列形式で出力してください。他のテキストは含めないでください。
+
+    ```json
+    [
+      {"index": 0, "score": 8, "reason": "評価理由 (50文字以内)"},
+      {"index": 1, "score": 6, "reason": "評価理由 (50文字以内)"},
+      ...
+    ]
+    ```
+
+    ## 要約リスト
+    """
+)
+
+
+@dataclass
+class SummaryQualityScore:
+    """要約の品質スコア"""
+
+    index: int
+    score: int
+    reason: str
+
+
+def evaluate_summary_quality(
+    summaries: list[dict[str, str]],
+    llm: GraphLanguageModel,
+    top_n: int = 3,
+) -> list[int]:
+    """
+    複数の要約の品質を評価し、上位N件のインデックスを返す。
+
+    Args:
+        summaries: 要約のリスト。各要素は {"theme": str, "title": str, "content": str} を含む
+        llm: Geminiクライアント
+        top_n: 返す上位件数
+
+    Returns:
+        list[int]: 品質スコア上位N件の要約のインデックス (元のリストにおける位置)
+    """
+    if len(summaries) <= top_n:
+        return list(range(len(summaries)))
+
+    # 要約リストをテキスト化
+    summary_texts = []
+    for i, s in enumerate(summaries):
+        summary_texts.append(
+            f"[{i}] テーマ: {s.get('theme', '')}\n"
+            f"タイトル: {s.get('title', '')}\n"
+            f"要約: {s.get('content', '')}"
+        )
+
+    input_text = "\n\n---\n\n".join(summary_texts)
+    prompt = f"{SUMMARY_QUALITY_EVALUATION_PROMPT}\n{input_text}"
+
+    try:
+        response = llm.comment_on_text(input_text, prompt)
+
+        # JSONパース
+        json_match = re.search(r"\[[\s\S]*\]", response)
+        if json_match:
+            scores_data = json.loads(json_match.group())
+            # スコアでソートして上位N件のインデックスを取得
+            scores_data.sort(key=lambda x: x.get("score", 0), reverse=True)
+            return [item["index"] for item in scores_data[:top_n]]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        pass
+
+    # パース失敗時は最初のN件を返す
+    return list(range(top_n))
+
+
 @dataclass
 class DuckDuckGoSearchResult:
     """DuckDuckGo検索結果"""
