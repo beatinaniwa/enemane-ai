@@ -16,6 +16,7 @@ from enemane_ai.analyzer import (
     analyze_image,
     analyze_text,
     build_power_calendar_context,
+    build_power_calendar_extended_context,
     build_supplementary_context,
     collect_graph_entries,
     judge_article_relevance,
@@ -396,6 +397,195 @@ def test_build_power_calendar_context() -> None:
     assert "290.0 kWh/日" in context
     assert "95.0 kWh/日" in context
     assert "上位5日" in context
+
+
+def test_build_power_calendar_extended_context_current_only() -> None:
+    """当年データのみのコンテキスト構築."""
+    curr_power = MonthlyPowerCalendarData(
+        year_month="2024年10月",
+        daily_summaries=[
+            DailyPowerSummary(
+                date="2024-10-01",
+                day_of_week="火",
+                total_kwh=300.0,
+                max_kwh=21.5,
+                max_time="14:00",
+            ),
+        ],
+        total_monthly_kwh=9000.0,
+        max_usage_day="1日(火)",
+        max_usage_kwh=300.0,
+        max_demand_day="1日(火)",
+        max_demand_kw=21.5,
+        weekday_avg_kwh=300.0,
+        weekend_avg_kwh=100.0,
+    )
+
+    context = build_power_calendar_extended_context(curr_power=curr_power)
+
+    assert "当年30分間隔電力データ" in context
+    assert "2024年10月" in context
+    assert "9,000.0 kWh" in context
+    assert "前年30分間隔電力データ" not in context
+    assert "前年比較" not in context
+    assert "気温データ" not in context
+
+
+def test_build_power_calendar_extended_context_with_prev_power() -> None:
+    """前年電力データありのコンテキスト構築."""
+    curr_power = MonthlyPowerCalendarData(
+        year_month="2024年10月",
+        daily_summaries=[],
+        total_monthly_kwh=9000.0,
+        max_usage_day="1日(火)",
+        max_usage_kwh=300.0,
+        max_demand_day="1日(火)",
+        max_demand_kw=21.5,
+        weekday_avg_kwh=300.0,
+        weekend_avg_kwh=100.0,
+    )
+    prev_power = MonthlyPowerCalendarData(
+        year_month="2023年10月",
+        daily_summaries=[],
+        total_monthly_kwh=8500.0,
+        max_usage_day="1日(火)",
+        max_usage_kwh=280.0,
+        max_demand_day="1日(火)",
+        max_demand_kw=20.0,
+        weekday_avg_kwh=280.0,
+        weekend_avg_kwh=95.0,
+    )
+
+    context = build_power_calendar_extended_context(
+        curr_power=curr_power,
+        prev_power=prev_power,
+    )
+
+    # 当年データの確認
+    assert "当年30分間隔電力データ" in context
+    assert "2024年10月" in context
+    assert "9,000.0 kWh" in context
+
+    # 前年データの確認
+    assert "前年30分間隔電力データ" in context
+    assert "2023年10月" in context
+    assert "8,500.0 kWh" in context
+
+    # 前年比較の確認
+    assert "前年比較" in context
+    assert "+500.0 kWh" in context
+    assert "+5.9%" in context
+
+
+def test_build_power_calendar_extended_context_with_temperature() -> None:
+    """気温データありのコンテキスト構築."""
+    curr_power = MonthlyPowerCalendarData(
+        year_month="2024年10月",
+        daily_summaries=[],
+        total_monthly_kwh=9000.0,
+        max_usage_day="1日(火)",
+        max_usage_kwh=300.0,
+        max_demand_day="1日(火)",
+        max_demand_kw=21.5,
+        weekday_avg_kwh=300.0,
+        weekend_avg_kwh=100.0,
+    )
+    prev_temp = MonthlyTemperatureSummary(
+        year_month="2023-10",
+        max_temp=28.0,
+        min_temp=13.0,
+        avg_temp=20.0,
+    )
+    curr_temp = MonthlyTemperatureSummary(
+        year_month="2024-10",
+        max_temp=30.0,
+        min_temp=15.0,
+        avg_temp=22.0,
+    )
+
+    context = build_power_calendar_extended_context(
+        curr_power=curr_power,
+        temperature=(prev_temp, curr_temp),
+    )
+
+    # 気温データの確認
+    assert "気温データ" in context
+    assert "2023年10月" in context
+    assert "2024年10月" in context
+    assert "最高28.0" in context
+    assert "最高30.0" in context
+    assert "+2.0℃" in context  # 平均気温差
+
+
+def test_build_power_calendar_extended_context_full() -> None:
+    """全データを含むコンテキスト構築."""
+    curr_power = MonthlyPowerCalendarData(
+        year_month="2024年10月",
+        daily_summaries=[
+            DailyPowerSummary(
+                date="2024-10-01",
+                day_of_week="火",
+                total_kwh=300.0,
+                max_kwh=21.5,
+                max_time="14:00",
+            ),
+        ],
+        total_monthly_kwh=9000.0,
+        max_usage_day="1日(火)",
+        max_usage_kwh=300.0,
+        max_demand_day="1日(火)",
+        max_demand_kw=21.5,
+        weekday_avg_kwh=300.0,
+        weekend_avg_kwh=100.0,
+    )
+    prev_power = MonthlyPowerCalendarData(
+        year_month="2023年10月",
+        daily_summaries=[],
+        total_monthly_kwh=8500.0,
+        max_usage_day="1日(火)",
+        max_usage_kwh=280.0,
+        max_demand_day="1日(火)",
+        max_demand_kw=20.0,
+        weekday_avg_kwh=280.0,
+        weekend_avg_kwh=95.0,
+    )
+    prev_temp = MonthlyTemperatureSummary(
+        year_month="2023-10",
+        max_temp=28.0,
+        min_temp=13.0,
+        avg_temp=20.0,
+    )
+    curr_temp = MonthlyTemperatureSummary(
+        year_month="2024-10",
+        max_temp=30.0,
+        min_temp=15.0,
+        avg_temp=22.0,
+    )
+
+    context = build_power_calendar_extended_context(
+        curr_power=curr_power,
+        prev_power=prev_power,
+        temperature=(prev_temp, curr_temp),
+    )
+
+    # 当年電力データ
+    assert "当年30分間隔電力データ" in context
+    assert "9,000.0 kWh" in context
+
+    # 前年電力データ
+    assert "前年30分間隔電力データ" in context
+    assert "8,500.0 kWh" in context
+
+    # 前年比較
+    assert "前年比較" in context
+    assert "+500.0 kWh" in context
+
+    # 気温データ
+    assert "気温データ" in context
+    assert "+2.0℃" in context
+
+    # 上位5日
+    assert "当年電力使用量 上位5日" in context
 
 
 # =============================================================================

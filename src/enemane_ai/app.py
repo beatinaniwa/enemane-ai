@@ -24,10 +24,11 @@ from enemane_ai.analyzer import (
     ArticleProgressInfo,
     GeminiGraphLanguageModel,
     GraphLanguageModel,
+    MonthlyPowerCalendarData,
     MonthlyReportData,
     MonthlyTemperatureSummary,
     analyze_image,
-    build_power_calendar_context,
+    build_power_calendar_extended_context,
     build_supplementary_context,
     collect_graph_entries,
     collect_relevant_articles,
@@ -424,6 +425,10 @@ def check_password() -> bool:
 
 def render_graph_analysis_tab() -> None:
     """グラフ分析タブのUIを描画。"""
+    # セッション状態の初期化
+    if "graph_analysis_results" not in st.session_state:
+        st.session_state.graph_analysis_results = None
+
     st.caption(
         "グラフ画像をアップロードし、月報CSV・気温データと組み合わせてAIコメントを生成します。"
     )
@@ -532,39 +537,56 @@ def render_graph_analysis_tab() -> None:
                     return
             status.update(label="完了", state="complete")
 
+        # 結果をセッション状態に保存
+        st.session_state.graph_analysis_results = results
+
+    # セッション状態から結果を表示
+    if st.session_state.graph_analysis_results is not None:
+        results = st.session_state.graph_analysis_results
+
         st.subheader("結果")
 
         if not results:
             st.warning("分析結果がありません。")
-            return
+        else:
+            # テーブル表示
+            st.markdown("#### テーブル出力")
+            table_data = [
+                {
+                    "対応するグラフ名": row.graph_name,
+                    "項目名": row.item_name,
+                    "生成するAIコメント": row.ai_comment,
+                }
+                for row in results
+            ]
+            st.table(table_data)
 
-        # テーブル表示
-        st.markdown("#### テーブル出力")
-        table_data = [
-            {
-                "対応するグラフ名": row.graph_name,
-                "項目名": row.item_name,
-                "生成するAIコメント": row.ai_comment,
-            }
-            for row in results
-        ]
-        st.table(table_data)
-
-        # CSVダウンロード
-        st.download_button(
-            "CSVをダウンロード",
-            data=export_target_format_csv(results),
-            file_name="analysis_results.csv",
-            mime="text/csv",
-            key="graph_download_button",
-        )
+            # CSVダウンロード
+            st.download_button(
+                "CSVをダウンロード",
+                data=export_target_format_csv(results),
+                file_name="analysis_results.csv",
+                mime="text/csv",
+                key="graph_download_button",
+            )
 
 
 def render_calendar_analysis_tab() -> None:
     """電力カレンダー分析タブのUIを描画。"""
+    # セッション状態の初期化
+    if "calendar_analysis_results" not in st.session_state:
+        st.session_state.calendar_analysis_results = None
+    if "calendar_analysis_curr_power" not in st.session_state:
+        st.session_state.calendar_analysis_curr_power = None
+    if "calendar_analysis_prev_power" not in st.session_state:
+        st.session_state.calendar_analysis_prev_power = None
+    if "calendar_analysis_temperature" not in st.session_state:
+        st.session_state.calendar_analysis_temperature = None
+
     st.caption(
         "電力カレンダーPDFと30分間隔電力CSVをアップロードし、"
         "AIが事実+仮説のコメントを表形式で生成します。"
+        "前年データや気温データを追加すると、より詳細な分析が可能です。"
     )
 
     st.subheader("1. 電力カレンダーPDF")
@@ -576,16 +598,37 @@ def render_calendar_analysis_tab() -> None:
         help="日別の30分刻み電力使用量推移グラフが含まれるPDF",
     )
 
-    st.subheader("2. 30分間隔電力CSV")
-    power_csv = st.file_uploader(
-        "30分間隔の電力使用量CSVをアップロードしてください",
+    st.subheader("2. 電力データ")
+    col_power1, col_power2 = st.columns(2)
+
+    with col_power1:
+        power_csv = st.file_uploader(
+            "当年30分間隔電力CSV (必須)",
+            type=["csv"],
+            accept_multiple_files=False,
+            key="power_csv",
+            help="形式: 日時, kWh値 (例: 2024-10-01 00:00, 4.29)",
+        )
+
+    with col_power2:
+        prev_power_csv = st.file_uploader(
+            "前年30分間隔電力CSV (オプション)",
+            type=["csv"],
+            accept_multiple_files=False,
+            key="prev_power_csv",
+            help="前年同月の電力データ。前年比較分析に使用します。",
+        )
+
+    st.subheader("3. 気温データ (オプション)")
+    temperature_csv = st.file_uploader(
+        "気温CSV (前年・当年の2年分)",
         type=["csv"],
         accept_multiple_files=False,
-        key="power_csv",
-        help="形式: 日時, kWh値 (例: 2024-10-01 00:00, 4.29)",
+        key="calendar_temperature_csv",
+        help="形式: 日付時刻, 気温 (例: 2024/10/1 1:00, 25.0)。気温との相関分析に使用します。",
     )
 
-    st.subheader("3. 追加指示 (オプション)")
+    st.subheader("4. 追加指示 (オプション)")
     additional_instructions = st.text_area(
         "追加の指示",
         placeholder="例: 省エネ改善の示唆を重点的に分析してください。",
@@ -594,7 +637,7 @@ def render_calendar_analysis_tab() -> None:
     )
 
     if not calendar_pdf or not power_csv:
-        st.info("電力カレンダーPDFと30分間隔電力CSVの両方を選択してください。")
+        st.info("電力カレンダーPDFと当年30分間隔電力CSVの両方を選択してください。")
         return
 
     if st.button("分析を実行", type="primary", key="calendar_analyze_button"):
@@ -610,22 +653,51 @@ def render_calendar_analysis_tab() -> None:
                 pdf_path = tmpdir / calendar_pdf.name
                 pdf_path.write_bytes(calendar_pdf.getvalue())
 
-                # CSVを保存してパース
+                # 当年電力CSVを保存してパース
                 csv_path = tmpdir / power_csv.name
                 csv_path.write_bytes(power_csv.getvalue())
 
                 try:
-                    calendar_data = parse_power_30min_csv(csv_path)
+                    curr_power_data = parse_power_30min_csv(csv_path)
                     st.info(
-                        f"電力データ読み込み: {calendar_data.year_month}, "
-                        f"月間電力使用量: {calendar_data.total_monthly_kwh:,.1f} kWh, "
-                        f"最大電力使用量日: {calendar_data.max_usage_day}, "
-                        f"最大需要電力日: {calendar_data.max_demand_day}"
+                        f"当年電力データ読み込み: {curr_power_data.year_month}, "
+                        f"月間電力使用量: {curr_power_data.total_monthly_kwh:,.1f} kWh"
                     )
                 except Exception as exc:
                     status.update(label="失敗", state="error")
-                    st.error(f"電力CSVの読み込みに失敗しました: {exc}")
+                    st.error(f"当年電力CSVの読み込みに失敗しました: {exc}")
                     return
+
+                # 前年電力CSVをパース (オプション)
+                prev_power_data: MonthlyPowerCalendarData | None = None
+                if prev_power_csv:
+                    prev_csv_path = tmpdir / prev_power_csv.name
+                    prev_csv_path.write_bytes(prev_power_csv.getvalue())
+                    try:
+                        prev_power_data = parse_power_30min_csv(prev_csv_path)
+                        st.info(
+                            f"前年電力データ読み込み: {prev_power_data.year_month}, "
+                            f"月間電力使用量: {prev_power_data.total_monthly_kwh:,.1f} kWh"
+                        )
+                    except Exception as exc:
+                        st.warning(f"前年電力CSVの読み込みに失敗しました: {exc}")
+
+                # 気温CSVをパース (オプション)
+                temperature_data: (
+                    tuple[MonthlyTemperatureSummary, MonthlyTemperatureSummary] | None
+                ) = None
+                if temperature_csv:
+                    temp_path = tmpdir / temperature_csv.name
+                    temp_path.write_bytes(temperature_csv.getvalue())
+                    try:
+                        temperature_data = parse_temperature_csv_for_comparison(temp_path)
+                        prev_temp, curr_temp = temperature_data
+                        st.info(
+                            f"気温データ読み込み: {prev_temp.year_month} → {curr_temp.year_month}, "
+                            f"平均気温差: {curr_temp.avg_temp - prev_temp.avg_temp:+.1f}℃"
+                        )
+                    except Exception as exc:
+                        st.warning(f"気温CSVの読み込みに失敗しました: {exc}")
 
                 # PDFを画像に変換
                 status.update(label="PDFを処理中...", state="running")
@@ -642,8 +714,12 @@ def render_calendar_analysis_tab() -> None:
                     st.error(f"PDF処理に失敗しました: {exc}")
                     return
 
-                # コンテキストを構築
-                context = build_power_calendar_context(calendar_data)
+                # コンテキストを構築 (拡張版を使用)
+                context = build_power_calendar_extended_context(
+                    curr_power=curr_power_data,
+                    prev_power=prev_power_data,
+                    temperature=temperature_data,
+                )
 
                 # プロンプトを構築
                 full_prompt = CALENDAR_ANALYSIS_PROMPT
@@ -663,6 +739,19 @@ def render_calendar_analysis_tab() -> None:
 
             status.update(label="完了", state="complete")
 
+        # 結果をセッション状態に保存
+        st.session_state.calendar_analysis_results = results
+        st.session_state.calendar_analysis_curr_power = curr_power_data
+        st.session_state.calendar_analysis_prev_power = prev_power_data
+        st.session_state.calendar_analysis_temperature = temperature_data
+
+    # セッション状態から結果を表示
+    if st.session_state.calendar_analysis_results is not None:
+        results = st.session_state.calendar_analysis_results
+        curr_power_data = st.session_state.calendar_analysis_curr_power
+        prev_power_data = st.session_state.calendar_analysis_prev_power
+        temperature_data = st.session_state.calendar_analysis_temperature
+
         # 結果表示
         st.subheader("結果")
 
@@ -670,29 +759,58 @@ def render_calendar_analysis_tab() -> None:
         st.markdown("#### 分析サマリー")
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("データ期間", calendar_data.year_month)
+            st.metric("データ期間", curr_power_data.year_month)
         with col2:
-            st.metric("月間電力使用量", f"{calendar_data.total_monthly_kwh:,.0f} kWh")
+            # 前年データがある場合は前年比を表示
+            if prev_power_data:
+                diff = curr_power_data.total_monthly_kwh - prev_power_data.total_monthly_kwh
+                pct = (
+                    (diff / prev_power_data.total_monthly_kwh * 100)
+                    if prev_power_data.total_monthly_kwh > 0
+                    else 0
+                )
+                st.metric(
+                    "月間電力使用量",
+                    f"{curr_power_data.total_monthly_kwh:,.0f} kWh",
+                    delta=f"{diff:+,.0f} kWh ({pct:+.1f}%)",
+                )
+            else:
+                st.metric("月間電力使用量", f"{curr_power_data.total_monthly_kwh:,.0f} kWh")
 
         col3, col4 = st.columns(2)
         with col3:
             st.metric(
                 "最大電力使用量日",
-                calendar_data.max_usage_day,
+                curr_power_data.max_usage_day,
                 help="1日の合計電力使用量(kWh)が最大の日",
             )
         with col4:
             st.metric(
                 "最大需要電力日",
-                calendar_data.max_demand_day,
+                curr_power_data.max_demand_day,
                 help="30分間隔のピーク値(kW)が最大の日",
             )
 
         col5, col6 = st.columns(2)
         with col5:
-            st.metric("平日平均", f"{calendar_data.weekday_avg_kwh:,.1f} kWh/日")
+            st.metric("平日平均", f"{curr_power_data.weekday_avg_kwh:,.1f} kWh/日")
         with col6:
-            st.metric("休日平均", f"{calendar_data.weekend_avg_kwh:,.1f} kWh/日")
+            st.metric("休日平均", f"{curr_power_data.weekend_avg_kwh:,.1f} kWh/日")
+
+        # 気温サマリー (データがある場合)
+        if temperature_data:
+            prev_temp, curr_temp = temperature_data
+            st.markdown("#### 気温サマリー")
+            col_temp1, col_temp2 = st.columns(2)
+            with col_temp1:
+                st.metric("当年平均気温", f"{curr_temp.avg_temp:.1f}℃")
+            with col_temp2:
+                temp_diff = curr_temp.avg_temp - prev_temp.avg_temp
+                st.metric(
+                    "前年平均気温",
+                    f"{prev_temp.avg_temp:.1f}℃",
+                    delta=f"{temp_diff:+.1f}℃ (当年との差)",
+                )
 
         # テーブル表示
         st.markdown("#### テーブル出力")
