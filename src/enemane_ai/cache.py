@@ -31,6 +31,18 @@ class CacheConfig:
     sheet_name: str = "article_cache"
 
 
+CACHE_HEADER_ROW = [
+    "cache_key",
+    "theme",
+    "building_types",
+    "title",
+    "content",
+    "image",
+    "link",
+    "created_at",
+]
+
+
 def generate_cache_key(theme: str, building_types: list[str]) -> str:
     """テーマと建物タイプからキャッシュキーを生成。
 
@@ -70,6 +82,20 @@ def get_gspread_client() -> "gspread.Client | None":
         return gspread.authorize(credentials)
     except Exception:
         return None
+
+
+def ensure_header_row(sheet: "gspread.Worksheet") -> None:
+    """シートにヘッダー行が存在しない場合は追加する。
+
+    Args:
+        sheet: gspreadワークシート
+    """
+    # 1行目を取得
+    first_row = sheet.row_values(1)
+
+    # ヘッダーが存在しない (空または異なる) 場合は追加
+    if not first_row or first_row[0] != CACHE_HEADER_ROW[0]:
+        sheet.insert_row(CACHE_HEADER_ROW, 1)
 
 
 def get_cached_articles(
@@ -140,6 +166,9 @@ def save_articles_to_cache(
     try:
         sheet = client.open_by_key(config.spreadsheet_id).worksheet(config.sheet_name)
 
+        # ヘッダー行を確保
+        ensure_header_row(sheet)
+
         # 既存データを削除
         delete_cached_articles(cache_key, sheet)
 
@@ -159,7 +188,9 @@ def save_articles_to_cache(
         ]
 
         if rows_to_add:
-            sheet.append_rows(rows_to_add, value_input_option="USER_ENTERED")
+            from gspread.utils import ValueInputOption
+
+            sheet.append_rows(rows_to_add, value_input_option=ValueInputOption.user_entered)
 
         return True
     except Exception:

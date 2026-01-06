@@ -3,9 +3,11 @@
 from unittest.mock import MagicMock
 
 from enemane_ai.cache import (
+    CACHE_HEADER_ROW,
     ArticleCacheRow,
     CacheConfig,
     delete_cached_articles,
+    ensure_header_row,
     generate_cache_key,
     get_cached_articles,
     save_articles_to_cache,
@@ -36,6 +38,37 @@ class TestGenerateCacheKey:
     def test_empty_building_types(self) -> None:
         key = generate_cache_key("法令改正", [])
         assert key == "法令改正_"
+
+
+class TestEnsureHeaderRow:
+    """ヘッダー行確保のテスト。"""
+
+    def test_adds_header_when_sheet_is_empty(self) -> None:
+        """空のシートにヘッダーを追加する。"""
+        mock_sheet = MagicMock()
+        mock_sheet.row_values.return_value = []
+
+        ensure_header_row(mock_sheet)
+
+        mock_sheet.insert_row.assert_called_once_with(CACHE_HEADER_ROW, 1)
+
+    def test_adds_header_when_first_row_is_different(self) -> None:
+        """1行目が異なる場合はヘッダーを追加する。"""
+        mock_sheet = MagicMock()
+        mock_sheet.row_values.return_value = ["different_value", "other"]
+
+        ensure_header_row(mock_sheet)
+
+        mock_sheet.insert_row.assert_called_once_with(CACHE_HEADER_ROW, 1)
+
+    def test_does_not_add_header_when_already_exists(self) -> None:
+        """ヘッダーが既に存在する場合は追加しない。"""
+        mock_sheet = MagicMock()
+        mock_sheet.row_values.return_value = CACHE_HEADER_ROW
+
+        ensure_header_row(mock_sheet)
+
+        mock_sheet.insert_row.assert_not_called()
 
 
 class TestGetCachedArticles:
