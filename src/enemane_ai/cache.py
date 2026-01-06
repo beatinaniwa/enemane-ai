@@ -114,30 +114,30 @@ def get_cached_articles(
 
     Returns:
         キャッシュされた記事のリスト、キャッシュミス時はNone
+
+    Raises:
+        Exception: SpreadSheetへのアクセスに失敗した場合
     """
     cache_key = generate_cache_key(theme, building_types)
 
-    try:
-        sheet = client.open_by_key(config.spreadsheet_id).worksheet(config.sheet_name)
-        all_records = sheet.get_all_records()
+    sheet = client.open_by_key(config.spreadsheet_id).worksheet(config.sheet_name)
+    all_records = sheet.get_all_records()
 
-        cached_rows = [row for row in all_records if row.get("cache_key") == cache_key]
+    cached_rows = [row for row in all_records if row.get("cache_key") == cache_key]
 
-        if not cached_rows:
-            return None
-
-        return [
-            ArticleCacheRow(
-                theme=str(row.get("theme", "")),
-                title=str(row.get("title", "")),
-                content=str(row.get("content", "")),
-                image=str(row.get("image", "")),
-                link=str(row.get("link", "")),
-            )
-            for row in cached_rows
-        ]
-    except Exception:
+    if not cached_rows:
         return None
+
+    return [
+        ArticleCacheRow(
+            theme=str(row.get("theme", "")),
+            title=str(row.get("title", "")),
+            content=str(row.get("content", "")),
+            image=str(row.get("image", "")),
+            link=str(row.get("link", "")),
+        )
+        for row in cached_rows
+    ]
 
 
 def save_articles_to_cache(

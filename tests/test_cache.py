@@ -175,15 +175,17 @@ class TestGetCachedArticles:
 
         assert result is None
 
-    def test_exception_returns_none(self) -> None:
-        """例外発生時はNoneを返す。"""
+    def test_exception_propagates(self) -> None:
+        """例外発生時は呼び出し元に伝播する。"""
+        import pytest
+
         mock_client = MagicMock()
         mock_client.open_by_key.side_effect = Exception("Connection error")
 
         config = CacheConfig(spreadsheet_id="test-id")
-        result = get_cached_articles("法令改正", ["オフィス"], mock_client, config)
 
-        assert result is None
+        with pytest.raises(Exception, match="Connection error"):
+            get_cached_articles("法令改正", ["オフィス"], mock_client, config)
 
 
 class TestSaveArticlesToCache:
