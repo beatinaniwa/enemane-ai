@@ -209,9 +209,8 @@ class TestSaveArticlesToCache:
         ]
 
         config = CacheConfig(spreadsheet_id="test-id")
-        result = save_articles_to_cache("法令改正", ["オフィス"], articles, mock_client, config)
+        save_articles_to_cache("法令改正", ["オフィス"], articles, mock_client, config)
 
-        assert result is True
         mock_sheet.append_rows.assert_called_once()
 
         # 保存されたデータの検証
@@ -242,9 +241,8 @@ class TestSaveArticlesToCache:
         ]
 
         config = CacheConfig(spreadsheet_id="test-id")
-        result = save_articles_to_cache("法令改正", ["オフィス"], articles, mock_client, config)
+        save_articles_to_cache("法令改正", ["オフィス"], articles, mock_client, config)
 
-        assert result is True
         call_args = mock_sheet.append_rows.call_args[0][0]
         assert len(call_args) == 3
 
@@ -273,8 +271,10 @@ class TestSaveArticlesToCache:
         # 削除が呼ばれたことを確認
         mock_sheet.delete_rows.assert_called()
 
-    def test_exception_returns_false(self) -> None:
-        """例外発生時はFalseを返す。"""
+    def test_exception_propagates(self) -> None:
+        """例外発生時は呼び出し元に伝播する。"""
+        import pytest
+
         mock_client = MagicMock()
         mock_client.open_by_key.side_effect = Exception("Connection error")
 
@@ -289,9 +289,9 @@ class TestSaveArticlesToCache:
         ]
 
         config = CacheConfig(spreadsheet_id="test-id")
-        result = save_articles_to_cache("法令改正", ["オフィス"], articles, mock_client, config)
 
-        assert result is False
+        with pytest.raises(Exception, match="Connection error"):
+            save_articles_to_cache("法令改正", ["オフィス"], articles, mock_client, config)
 
 
 class TestDeleteCachedArticles:

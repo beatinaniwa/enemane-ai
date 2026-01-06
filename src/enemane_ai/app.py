@@ -1090,10 +1090,10 @@ def render_article_search_tab() -> None:
                     )
                     for r in results
                 ]
-                if save_articles_to_cache(
+                save_articles_to_cache(
                     theme, building_types, cache_rows, gspread_client, cache_config
-                ):
-                    st.info("結果をキャッシュに保存しました")
+                )
+                st.info("結果をキャッシュに保存しました")
             except Exception as e:
                 st.warning(f"キャッシュ保存に失敗しました: {e}")
 

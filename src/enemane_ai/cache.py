@@ -146,7 +146,7 @@ def save_articles_to_cache(
     articles: list[ArticleCacheRow],
     client: "gspread.Client",
     config: CacheConfig,
-) -> bool:
+) -> None:
     """記事をキャッシュに保存。既存の同一キャッシュキーのデータは削除してから保存。
 
     Args:
@@ -156,45 +156,40 @@ def save_articles_to_cache(
         client: gspreadクライアント
         config: キャッシュ設定
 
-    Returns:
-        保存成功時True、失敗時False
+    Raises:
+        Exception: SpreadSheetへのアクセスに失敗した場合
     """
+    from gspread.utils import ValueInputOption
+
     cache_key = generate_cache_key(theme, building_types)
     now = datetime.now(timezone.utc)
     building_types_str = ",".join(sorted(building_types))
 
-    try:
-        sheet = client.open_by_key(config.spreadsheet_id).worksheet(config.sheet_name)
+    sheet = client.open_by_key(config.spreadsheet_id).worksheet(config.sheet_name)
 
-        # ヘッダー行を確保
-        ensure_header_row(sheet)
+    # ヘッダー行を確保
+    ensure_header_row(sheet)
 
-        # 既存データを削除
-        delete_cached_articles(cache_key, sheet)
+    # 既存データを削除
+    delete_cached_articles(cache_key, sheet)
 
-        # 新規データを追加
-        rows_to_add = [
-            [
-                cache_key,
-                theme,
-                building_types_str,
-                article.title,
-                article.content,
-                article.image,
-                article.link,
-                now.isoformat(),
-            ]
-            for article in articles
+    # 新規データを追加
+    rows_to_add = [
+        [
+            cache_key,
+            theme,
+            building_types_str,
+            article.title,
+            article.content,
+            article.image,
+            article.link,
+            now.isoformat(),
         ]
+        for article in articles
+    ]
 
-        if rows_to_add:
-            from gspread.utils import ValueInputOption
-
-            sheet.append_rows(rows_to_add, value_input_option=ValueInputOption.user_entered)
-
-        return True
-    except Exception:
-        return False
+    if rows_to_add:
+        sheet.append_rows(rows_to_add, value_input_option=ValueInputOption.user_entered)
 
 
 def delete_cached_articles(cache_key: str, sheet: "gspread.Worksheet") -> int:
