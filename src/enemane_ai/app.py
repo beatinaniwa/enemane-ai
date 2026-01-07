@@ -39,6 +39,13 @@ from enemane_ai.analyzer import (
     pdf_to_images,
     summarize_article,
 )
+from enemane_ai.cache import (
+    ArticleCacheRow,
+    CacheConfig,
+    get_cached_articles,
+    get_gspread_client,
+    save_articles_to_cache,
+)
 
 if TYPE_CHECKING:
     from streamlit.runtime.uploaded_file_manager import UploadedFile
@@ -863,19 +870,29 @@ def render_article_search_tab() -> None:
 
     st.subheader("2. 送付先の建物タイプ (必須)")
     st.caption("建物タイプを選択すると、その建物タイプの担当者に適した記事のみを収集します")
-    building_types = st.multiselect(
+    building_type = st.selectbox(
         "建物タイプを選択",
-        options=BUILDING_TYPES,
-        default=[],
-        key="article_building_types",
+        options=["", *BUILDING_TYPES],
+        index=0,
+        key="article_building_type",
+        format_func=lambda x: "選択してください" if x == "" else x,
     )
 
     # 建物タイプ未選択時の警告
-    if not building_types:
-        st.warning("建物タイプを1つ以上選択してください")
+    if not building_type:
+        st.warning("建物タイプを選択してください")
+
+    # キャッシュオプション
+    st.subheader("3. オプション")
+    ignore_cache = st.checkbox(
+        "キャッシュを無視して再検索",
+        value=False,
+        key="article_ignore_cache",
+        help="チェックすると、キャッシュされた結果を無視して新しく検索し、キャッシュを上書きします",
+    )
 
     # 建物タイプが選択されている場合のみボタンを有効化
-    button_disabled = len(building_types) == 0
+    button_disabled = building_type == ""
 
     if st.button(
         "検索・要約を実行",
@@ -883,6 +900,41 @@ def render_article_search_tab() -> None:
         key="article_search_button",
         disabled=button_disabled,
     ):
+        # キャッシュ機能の初期化
+        gspread_client = None
+        cache_config = None
+        spreadsheet_id = st.secrets.get("SPREADSHEET_ID", "")
+
+        if spreadsheet_id:
+            try:
+                gspread_client = get_gspread_client()
+                if gspread_client:
+                    cache_config = CacheConfig(spreadsheet_id=spreadsheet_id)
+            except Exception as e:
+                st.warning(f"キャッシュ機能の初期化に失敗しました(通常検索を実行します): {e}")
+
+        # キャッシュ確認 (ignore_cache=Falseかつキャッシュ機能が利用可能な場合)
+        if not ignore_cache and gspread_client and cache_config:
+            try:
+                cached = get_cached_articles(theme, building_type, gspread_client, cache_config)
+                if cached:
+                    # キャッシュヒット - ArticleCacheRowからArticleOutputRowに変換
+                    cached_results = [
+                        ArticleOutputRow(
+                            theme=row.theme,
+                            title=row.title,
+                            content=row.content,
+                            image=row.image,
+                            link=row.link,
+                        )
+                        for row in cached
+                    ]
+                    st.session_state.article_results = cached_results
+                    st.success(f"キャッシュから{len(cached_results)}件の結果を取得しました")
+                    st.rerun()
+            except Exception as e:
+                st.warning(f"キャッシュ確認に失敗しました(通常検索を実行します): {e}")
+
         # 判定・要約ともにFlash LLMを使用 (高速・安価)
         flash_llm = resolve_gemini_client_with_model(FLASH_MODEL_NAME)
 
@@ -921,7 +973,7 @@ def render_article_search_tab() -> None:
                         icon = "❌"
                         result_text = "不適切"
                     # タイトルと理由を改行して表示
-                    log_entry = f"{icon} **[{result_text}]** {info.title}\n" f"   └ {info.reason}\n"
+                    log_entry = f"{icon} **[{result_text}]** {info.title}\n   └ {info.reason}\n"
                     log_entries.append(log_entry)
                     # 全件を表示
                     article_log.markdown("\n".join(log_entries))
@@ -929,7 +981,7 @@ def render_article_search_tab() -> None:
             try:
                 collection_result = collect_relevant_articles(
                     theme=theme,
-                    building_types=building_types,
+                    building_type=building_type,
                     flash_llm=flash_llm,
                     target_count=20,
                     max_search_attempts=10,
@@ -1025,6 +1077,26 @@ def render_article_search_tab() -> None:
 
         # 結果をセッション状態に保存
         st.session_state.article_results = results
+
+        # キャッシュに保存 (キャッシュ機能が利用可能な場合)
+        if gspread_client and cache_config and results:
+            try:
+                cache_rows = [
+                    ArticleCacheRow(
+                        theme=r.theme,
+                        title=r.title,
+                        content=r.content,
+                        image=r.image,
+                        link=r.link,
+                    )
+                    for r in results
+                ]
+                save_articles_to_cache(
+                    theme, building_type, cache_rows, gspread_client, cache_config
+                )
+                st.info("結果をキャッシュに保存しました")
+            except Exception as e:
+                st.warning(f"キャッシュ保存に失敗しました: {e}")
 
     # 結果表示 (セッション状態から)
     if st.session_state.article_results:
