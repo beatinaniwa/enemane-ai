@@ -870,16 +870,17 @@ def render_article_search_tab() -> None:
 
     st.subheader("2. 送付先の建物タイプ (必須)")
     st.caption("建物タイプを選択すると、その建物タイプの担当者に適した記事のみを収集します")
-    building_types = st.multiselect(
+    building_type = st.selectbox(
         "建物タイプを選択",
-        options=BUILDING_TYPES,
-        default=[],
-        key="article_building_types",
+        options=["", *BUILDING_TYPES],
+        index=0,
+        key="article_building_type",
+        format_func=lambda x: "選択してください" if x == "" else x,
     )
 
     # 建物タイプ未選択時の警告
-    if not building_types:
-        st.warning("建物タイプを1つ以上選択してください")
+    if not building_type:
+        st.warning("建物タイプを選択してください")
 
     # キャッシュオプション
     st.subheader("3. オプション")
@@ -891,7 +892,7 @@ def render_article_search_tab() -> None:
     )
 
     # 建物タイプが選択されている場合のみボタンを有効化
-    button_disabled = len(building_types) == 0
+    button_disabled = building_type == ""
 
     if st.button(
         "検索・要約を実行",
@@ -915,7 +916,7 @@ def render_article_search_tab() -> None:
         # キャッシュ確認 (ignore_cache=Falseかつキャッシュ機能が利用可能な場合)
         if not ignore_cache and gspread_client and cache_config:
             try:
-                cached = get_cached_articles(theme, building_types, gspread_client, cache_config)
+                cached = get_cached_articles(theme, building_type, gspread_client, cache_config)
                 if cached:
                     # キャッシュヒット - ArticleCacheRowからArticleOutputRowに変換
                     cached_results = [
@@ -980,7 +981,7 @@ def render_article_search_tab() -> None:
             try:
                 collection_result = collect_relevant_articles(
                     theme=theme,
-                    building_types=building_types,
+                    building_type=building_type,
                     flash_llm=flash_llm,
                     target_count=20,
                     max_search_attempts=10,
@@ -1091,7 +1092,7 @@ def render_article_search_tab() -> None:
                     for r in results
                 ]
                 save_articles_to_cache(
-                    theme, building_types, cache_rows, gspread_client, cache_config
+                    theme, building_type, cache_rows, gspread_client, cache_config
                 )
                 st.info("結果をキャッシュに保存しました")
             except Exception as e:

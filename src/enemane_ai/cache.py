@@ -43,25 +43,24 @@ CACHE_HEADER_ROW = [
 ]
 
 
-def generate_cache_key(theme: str, building_types: list[str]) -> str:
+def generate_cache_key(theme: str, building_type: str) -> str:
     """テーマと建物タイプからキャッシュキーを生成。
-
-    建物タイプはソートしてから結合することで、順序に依存しないキーを生成。
 
     Args:
         theme: テーマ名
-        building_types: 建物タイプのリスト
+        building_type: 建物タイプ
 
     Returns:
         キャッシュキー文字列
     """
-    sorted_types = sorted(building_types)
-    types_str = "_".join(sorted_types)
-    return f"{theme}_{types_str}"
+    return f"{theme}_{building_type}"
 
 
-def get_gspread_client() -> "gspread.Client | None":
+def get_gspread_client(debug: bool = False) -> "gspread.Client | None":
     """Streamlit secretsからサービスアカウント認証情報を取得し、gspreadクライアントを生成。
+
+    Args:
+        debug: Trueの場合、エラー詳細をst.errorで表示
 
     Returns:
         gspreadクライアント、認証失敗時はNone
@@ -72,6 +71,8 @@ def get_gspread_client() -> "gspread.Client | None":
 
         creds_dict = st.secrets.get("gcp_service_account")
         if not creds_dict:
+            if debug:
+                st.error("gcp_service_account が secrets.toml に設定されていません")
             return None
 
         scopes = [
@@ -80,7 +81,9 @@ def get_gspread_client() -> "gspread.Client | None":
         ]
         credentials = Credentials.from_service_account_info(dict(creds_dict), scopes=scopes)
         return gspread.authorize(credentials)
-    except Exception:
+    except Exception as e:
+        if debug:
+            st.error(f"gspreadクライアント初期化エラー: {e}")
         return None
 
 
@@ -100,7 +103,7 @@ def ensure_header_row(sheet: "gspread.Worksheet") -> None:
 
 def get_cached_articles(
     theme: str,
-    building_types: list[str],
+    building_type: str,
     client: "gspread.Client",
     config: CacheConfig,
 ) -> list[ArticleCacheRow] | None:
@@ -108,7 +111,7 @@ def get_cached_articles(
 
     Args:
         theme: テーマ名
-        building_types: 建物タイプのリスト
+        building_type: 建物タイプ
         client: gspreadクライアント
         config: キャッシュ設定
 
@@ -118,7 +121,7 @@ def get_cached_articles(
     Raises:
         Exception: SpreadSheetへのアクセスに失敗した場合
     """
-    cache_key = generate_cache_key(theme, building_types)
+    cache_key = generate_cache_key(theme, building_type)
 
     sheet = client.open_by_key(config.spreadsheet_id).worksheet(config.sheet_name)
     all_records = sheet.get_all_records()
@@ -142,7 +145,7 @@ def get_cached_articles(
 
 def save_articles_to_cache(
     theme: str,
-    building_types: list[str],
+    building_type: str,
     articles: list[ArticleCacheRow],
     client: "gspread.Client",
     config: CacheConfig,
@@ -151,7 +154,7 @@ def save_articles_to_cache(
 
     Args:
         theme: テーマ名
-        building_types: 建物タイプのリスト
+        building_type: 建物タイプ
         articles: 保存する記事のリスト
         client: gspreadクライアント
         config: キャッシュ設定
@@ -161,9 +164,8 @@ def save_articles_to_cache(
     """
     from gspread.utils import ValueInputOption
 
-    cache_key = generate_cache_key(theme, building_types)
+    cache_key = generate_cache_key(theme, building_type)
     now = datetime.now(timezone.utc)
-    building_types_str = ",".join(sorted(building_types))
 
     sheet = client.open_by_key(config.spreadsheet_id).worksheet(config.sheet_name)
 
@@ -178,7 +180,7 @@ def save_articles_to_cache(
         [
             cache_key,
             theme,
-            building_types_str,
+            building_type,
             article.title,
             article.content,
             article.image,

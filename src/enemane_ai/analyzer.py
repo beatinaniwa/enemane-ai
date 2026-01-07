@@ -1453,7 +1453,7 @@ class ArticleProgressInfo:
 
 def collect_relevant_articles(
     theme: str,
-    building_types: list[str],
+    building_type: str,
     flash_llm: GraphLanguageModel,
     target_count: int = 20,
     max_search_attempts: int = 10,
@@ -1464,7 +1464,7 @@ def collect_relevant_articles(
 
     Args:
         theme: 検索テーマ
-        building_types: 建物タイプのリスト
+        building_type: 建物タイプ
         flash_llm: Gemini Flash クライアント (判定用)
         target_count: 目標記事数 (デフォルト20)
         max_search_attempts: 最大検索回数 (無限ループ防止)
@@ -1479,8 +1479,8 @@ def collect_relevant_articles(
     total_searched = 0
     total_judged = 0
 
-    # 建物タイプをコンテキストとして結合
-    building_context = "、".join(building_types)
+    # 建物タイプをコンテキストとして使用
+    building_context = building_type
 
     # テーマに対応する検索クエリを取得
     search_queries = THEME_SEARCH_QUERIES.get(theme, [f"{theme} コラム 記事"])

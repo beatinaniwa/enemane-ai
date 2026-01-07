@@ -17,27 +17,21 @@ from enemane_ai.cache import (
 class TestGenerateCacheKey:
     """キャッシュキー生成のテスト。"""
 
-    def test_single_building_type(self) -> None:
-        key = generate_cache_key("法令改正", ["オフィス"])
+    def test_generates_key_with_theme_and_building_type(self) -> None:
+        key = generate_cache_key("法令改正", "オフィス")
         assert key == "法令改正_オフィス"
 
-    def test_multiple_building_types_sorted(self) -> None:
-        # 順序に依存しないことを確認
-        key1 = generate_cache_key("他社事例", ["工場", "オフィス"])
-        key2 = generate_cache_key("他社事例", ["オフィス", "工場"])
-        assert key1 == key2
-        assert key1 == "他社事例_オフィス_工場"
+    def test_different_building_types_generate_different_keys(self) -> None:
+        key1 = generate_cache_key("法令改正", "オフィス")
+        key2 = generate_cache_key("法令改正", "工場")
+        assert key1 != key2
+        assert key1 == "法令改正_オフィス"
+        assert key2 == "法令改正_工場"
 
-    def test_all_building_types(self) -> None:
-        key = generate_cache_key(
-            "社会トレンド",
-            ["介護福祉施設", "自治体施設", "オフィス", "工場"],
-        )
-        assert key == "社会トレンド_オフィス_介護福祉施設_工場_自治体施設"
-
-    def test_empty_building_types(self) -> None:
-        key = generate_cache_key("法令改正", [])
-        assert key == "法令改正_"
+    def test_different_themes_generate_different_keys(self) -> None:
+        key1 = generate_cache_key("法令改正", "オフィス")
+        key2 = generate_cache_key("他社事例", "オフィス")
+        assert key1 != key2
 
 
 class TestEnsureHeaderRow:
@@ -94,7 +88,7 @@ class TestGetCachedArticles:
         ]
 
         config = CacheConfig(spreadsheet_id="test-id")
-        result = get_cached_articles("法令改正", ["オフィス"], mock_client, config)
+        result = get_cached_articles("法令改正", "オフィス", mock_client, config)
 
         assert result is not None
         assert len(result) == 1
@@ -136,7 +130,7 @@ class TestGetCachedArticles:
         ]
 
         config = CacheConfig(spreadsheet_id="test-id")
-        result = get_cached_articles("法令改正", ["オフィス"], mock_client, config)
+        result = get_cached_articles("法令改正", "オフィス", mock_client, config)
 
         assert result is not None
         assert len(result) == 3
@@ -149,7 +143,7 @@ class TestGetCachedArticles:
         mock_sheet.get_all_records.return_value = []
 
         config = CacheConfig(spreadsheet_id="test-id")
-        result = get_cached_articles("法令改正", ["オフィス"], mock_client, config)
+        result = get_cached_articles("法令改正", "オフィス", mock_client, config)
 
         assert result is None
 
@@ -171,7 +165,7 @@ class TestGetCachedArticles:
         ]
 
         config = CacheConfig(spreadsheet_id="test-id")
-        result = get_cached_articles("法令改正", ["オフィス"], mock_client, config)
+        result = get_cached_articles("法令改正", "オフィス", mock_client, config)
 
         assert result is None
 
@@ -185,7 +179,7 @@ class TestGetCachedArticles:
         config = CacheConfig(spreadsheet_id="test-id")
 
         with pytest.raises(Exception, match="Connection error"):
-            get_cached_articles("法令改正", ["オフィス"], mock_client, config)
+            get_cached_articles("法令改正", "オフィス", mock_client, config)
 
 
 class TestSaveArticlesToCache:
@@ -209,7 +203,7 @@ class TestSaveArticlesToCache:
         ]
 
         config = CacheConfig(spreadsheet_id="test-id")
-        save_articles_to_cache("法令改正", ["オフィス"], articles, mock_client, config)
+        save_articles_to_cache("法令改正", "オフィス", articles, mock_client, config)
 
         mock_sheet.append_rows.assert_called_once()
 
@@ -218,7 +212,7 @@ class TestSaveArticlesToCache:
         assert len(call_args) == 1
         assert call_args[0][0] == "法令改正_オフィス"  # cache_key
         assert call_args[0][1] == "法令改正"  # theme
-        assert call_args[0][2] == "オフィス"  # building_types
+        assert call_args[0][2] == "オフィス"  # building_type
         assert call_args[0][3] == "テスト"  # title
         assert call_args[0][4] == "要約"  # content
 
@@ -241,7 +235,7 @@ class TestSaveArticlesToCache:
         ]
 
         config = CacheConfig(spreadsheet_id="test-id")
-        save_articles_to_cache("法令改正", ["オフィス"], articles, mock_client, config)
+        save_articles_to_cache("法令改正", "オフィス", articles, mock_client, config)
 
         call_args = mock_sheet.append_rows.call_args[0][0]
         assert len(call_args) == 3
@@ -266,7 +260,7 @@ class TestSaveArticlesToCache:
         ]
 
         config = CacheConfig(spreadsheet_id="test-id")
-        save_articles_to_cache("法令改正", ["オフィス"], articles, mock_client, config)
+        save_articles_to_cache("法令改正", "オフィス", articles, mock_client, config)
 
         # 削除が呼ばれたことを確認
         mock_sheet.delete_rows.assert_called()
@@ -291,7 +285,7 @@ class TestSaveArticlesToCache:
         config = CacheConfig(spreadsheet_id="test-id")
 
         with pytest.raises(Exception, match="Connection error"):
-            save_articles_to_cache("法令改正", ["オフィス"], articles, mock_client, config)
+            save_articles_to_cache("法令改正", "オフィス", articles, mock_client, config)
 
 
 class TestDeleteCachedArticles:
