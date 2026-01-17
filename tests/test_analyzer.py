@@ -13,14 +13,18 @@ from enemane_ai.analyzer import (
     MonthlyPowerCalendarData,
     MonthlyReportData,
     MonthlyTemperatureSummary,
+    PeakDayCircuitData,
+    PeakDayPowerData,
     analyze_image,
     analyze_text,
+    build_peak_day_comparison_context,
     build_power_calendar_context,
     build_power_calendar_extended_context,
     build_supplementary_context,
     collect_graph_entries,
     judge_article_relevance,
     parse_monthly_report_csv,
+    parse_peak_day_power_csv,
     parse_power_30min_csv,
     parse_temperature_csv_for_comparison,
 )
@@ -673,3 +677,207 @@ def test_judge_article_relevance_truncates_long_content() -> None:
     # 5000文字のフルコンテンツは含まれていない
     assert long_content not in llm.last_prompt
     assert result.is_relevant is True
+
+
+# =============================================================================
+# グラフ用データ(4) (最大デマンド発生日データ) のテスト
+# =============================================================================
+
+
+def test_parse_peak_day_power_csv(tmp_path: Path) -> None:
+    """グラフ用データ(4) CSVをパースできること."""
+    csv_path = tmp_path / "月報202410.xlsx - グラフ用データ(4).csv"
+    csv_path.write_text(
+        "(4) 詳細データ(単位:kWh)\n"
+        "2024/10/02,0:00,0:30,1:00,1:30\n"
+        "受電電力,4.18,4.18,4.03,3.95\n"
+        "1F事務所SR_電灯,1.20,1.15,1.10,1.05\n",
+        encoding="utf-8",
+    )
+
+    data = parse_peak_day_power_csv(csv_path)
+
+    assert data.peak_date == "2024/10/02"
+    assert len(data.time_slots) == 4
+    assert data.time_slots[0] == "0:00"
+    assert data.time_slots[1] == "0:30"
+    assert len(data.circuits) == 2
+    assert data.circuits[0].circuit_name == "受電電力"
+    assert data.circuits[0].values[0] == 4.18
+    assert data.circuits[1].circuit_name == "1F事務所SR_電灯"
+
+
+def test_parse_peak_day_power_csv_shift_jis(tmp_path: Path) -> None:
+    """Shift_JISエンコーディングのCSVをパースできること."""
+    csv_path = tmp_path / "test.csv"
+    csv_path.write_bytes(
+        ("(4) 詳細データ\n" "2024/10/02,0:00,0:30\n" "受電電力,4.18,4.20\n").encode("cp932")
+    )
+
+    data = parse_peak_day_power_csv(csv_path)
+
+    assert data.peak_date == "2024/10/02"
+    assert data.circuits[0].circuit_name == "受電電力"
+    assert data.circuits[0].values[0] == 4.18
+
+
+def test_parse_peak_day_power_csv_invalid_format(tmp_path: Path) -> None:
+    """フォーマットが不正な場合はエラー."""
+    csv_path = tmp_path / "invalid.csv"
+    csv_path.write_text("header only\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="フォーマットが不正です"):
+        parse_peak_day_power_csv(csv_path)
+
+
+def test_parse_peak_day_power_csv_invalid_date(tmp_path: Path) -> None:
+    """日付フォーマットが不正な場合はエラー."""
+    csv_path = tmp_path / "invalid_date.csv"
+    csv_path.write_text(
+        "(4) 詳細データ\n" "invalid_date,0:00,0:30\n" "受電電力,4.18,4.20\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="日付フォーマットが不正です"):
+        parse_peak_day_power_csv(csv_path)
+
+
+def test_peak_day_power_data_properties() -> None:
+    """PeakDayPowerDataのプロパティが正しく動作すること."""
+    data = PeakDayPowerData(
+        peak_date="2024/10/02",
+        time_slots=["0:00", "0:30", "1:00", "1:30"],
+        circuits=[
+            PeakDayCircuitData(
+                circuit_name="受電電力",
+                values=[4.0, 5.0, 4.5, 4.2],  # max at index 1 (0:30)
+            ),
+            PeakDayCircuitData(
+                circuit_name="1F電灯",
+                values=[1.0, 1.5, 1.2, 1.1],
+            ),
+        ],
+    )
+
+    # ピーク時刻のテスト (受電電力の最大値のインデックス)
+    assert data.peak_time == "0:30"
+    # ピーク電力のテスト (kWh/30min -> kW: *2)
+    assert data.peak_power_kw == 10.0  # 5.0 * 2
+
+    # ピーク時刻の回路別電力値
+    peak_circuits = data.get_circuit_power_at_peak()
+    assert peak_circuits["受電電力"] == 5.0
+    assert peak_circuits["1F電灯"] == 1.5
+
+
+def test_peak_day_power_data_empty_circuits() -> None:
+    """回路データが空の場合のプロパティ動作."""
+    data = PeakDayPowerData(
+        peak_date="2024/10/02",
+        time_slots=["0:00", "0:30"],
+        circuits=[],
+    )
+
+    assert data.peak_time == ""
+    assert data.peak_power_kw == 0.0
+    assert data.get_circuit_power_at_peak() == {}
+
+
+def test_build_peak_day_comparison_context_current_only() -> None:
+    """当年データのみのコンテキスト構築."""
+    curr = PeakDayPowerData(
+        peak_date="2024/10/02",
+        time_slots=["14:00", "14:30"],
+        circuits=[
+            PeakDayCircuitData("受電電力", [40.0, 42.0]),
+            PeakDayCircuitData("1F電灯", [10.0, 11.0]),
+        ],
+    )
+
+    context = build_peak_day_comparison_context(curr)
+
+    assert "当年最大デマンド発生日データ" in context
+    assert "2024/10/02" in context
+    assert "14:30" in context  # peak time
+    assert "84.0 kW" in context  # 42.0 * 2
+    assert "前年" not in context
+
+
+def test_build_peak_day_comparison_context_with_prev() -> None:
+    """前年データありのコンテキスト構築."""
+    curr = PeakDayPowerData(
+        peak_date="2024/10/02",
+        time_slots=["14:00", "14:30"],
+        circuits=[
+            PeakDayCircuitData("受電電力", [40.0, 42.0]),
+            PeakDayCircuitData("1F電灯", [10.0, 12.0]),
+        ],
+    )
+    prev = PeakDayPowerData(
+        peak_date="2023/10/19",
+        time_slots=["14:00", "14:30"],
+        circuits=[
+            PeakDayCircuitData("受電電力", [38.0, 40.0]),
+            PeakDayCircuitData("1F電灯", [9.0, 10.0]),
+        ],
+    )
+
+    context = build_peak_day_comparison_context(curr, prev)
+
+    assert "当年最大デマンド発生日データ" in context
+    assert "前年最大デマンド発生日データ" in context
+    assert "前年比較" in context
+    assert "+4.0 kW" in context  # 84 - 80
+    assert "2023/10/19" in context
+    assert "2024/10/02" in context
+
+
+def test_build_peak_day_comparison_context_none() -> None:
+    """データなしの場合は空文字を返す."""
+    context = build_peak_day_comparison_context(None)
+    assert context == ""
+
+
+def test_build_peak_day_comparison_context_time_change() -> None:
+    """ピーク発生時刻が変化した場合の表示."""
+    curr = PeakDayPowerData(
+        peak_date="2024/10/02",
+        time_slots=["14:00", "14:30", "15:00"],
+        circuits=[
+            PeakDayCircuitData("受電電力", [40.0, 42.0, 45.0]),  # peak at 15:00
+        ],
+    )
+    prev = PeakDayPowerData(
+        peak_date="2023/10/19",
+        time_slots=["14:00", "14:30", "15:00"],
+        circuits=[
+            PeakDayCircuitData("受電電力", [40.0, 43.0, 42.0]),  # peak at 14:30
+        ],
+    )
+
+    context = build_peak_day_comparison_context(curr, prev)
+
+    # 発生時刻の変化を確認
+    assert "14:30 → 15:00" in context
+
+
+def test_build_peak_day_comparison_context_same_time() -> None:
+    """ピーク発生時刻が同一の場合の表示."""
+    curr = PeakDayPowerData(
+        peak_date="2024/10/02",
+        time_slots=["14:00", "14:30"],
+        circuits=[
+            PeakDayCircuitData("受電電力", [40.0, 42.0]),  # peak at 14:30
+        ],
+    )
+    prev = PeakDayPowerData(
+        peak_date="2023/10/19",
+        time_slots=["14:00", "14:30"],
+        circuits=[
+            PeakDayCircuitData("受電電力", [38.0, 40.0]),  # peak at 14:30
+        ],
+    )
+
+    context = build_peak_day_comparison_context(curr, prev)
+
+    assert "同一 (14:30)" in context

@@ -27,13 +27,16 @@ from enemane_ai.analyzer import (
     MonthlyPowerCalendarData,
     MonthlyReportData,
     MonthlyTemperatureSummary,
+    PeakDayPowerData,
     analyze_image,
+    build_peak_day_comparison_context,
     build_power_calendar_extended_context,
     build_supplementary_context,
     collect_graph_entries,
     collect_relevant_articles,
     evaluate_summary_quality,
     parse_monthly_report_csv,
+    parse_peak_day_power_csv,
     parse_power_30min_csv,
     parse_temperature_csv_for_comparison,
     pdf_to_images,
@@ -367,14 +370,33 @@ def analyze_graphs_with_context(
     graph_paths: list[Path],
     monthly_report: MonthlyReportData | None,
     temperature: tuple[MonthlyTemperatureSummary, MonthlyTemperatureSummary] | None,
+    peak_day_data: tuple[PeakDayPowerData | None, PeakDayPowerData | None] | None,
     base_prompt: str,
     llm: GraphLanguageModel,
 ) -> list[OutputRow]:
     """
     グラフ画像を補助データのコンテキスト付きで分析し、OutputRowのリストを返す。
+
+    Args:
+        graph_paths: グラフ画像ファイルパスのリスト
+        monthly_report: 月報データ (オプション)
+        temperature: 気温データ (前年, 当年) (オプション)
+        peak_day_data: 最大デマンド発生日データ (当年, 前年) (オプション)
+        base_prompt: ベースプロンプト
+        llm: LLMクライアント
+
+    Returns:
+        list[OutputRow]: 分析結果のリスト
     """
     # 補助データコンテキストを構築
     context = build_supplementary_context(monthly_report, temperature)
+
+    # 最大デマンド発生日コンテキストを追加
+    if peak_day_data:
+        curr_peak, prev_peak = peak_day_data
+        peak_context = build_peak_day_comparison_context(curr_peak, prev_peak)
+        if peak_context:
+            context = f"{context}\n\n{peak_context}" if context else peak_context
 
     # プロンプトを構築
     full_prompt = base_prompt
@@ -471,7 +493,29 @@ def render_graph_analysis_tab() -> None:
             help="前年と当年の気温データ。気温との相関分析に使用します。",
         )
 
-    st.subheader("3. 追加指示 (オプション)")
+    st.subheader("3. 最大デマンド発生日データ (オプション)")
+    st.caption("最大デマンド発生時の分析に使用します")
+    col_peak1, col_peak2 = st.columns(2)
+
+    with col_peak1:
+        curr_peak_day_file = st.file_uploader(
+            "当年 グラフ用データCSV",
+            type=["csv"],
+            accept_multiple_files=False,
+            key="curr_peak_day",
+            help="当年の最大デマンド発生日の30分間隔データ",
+        )
+
+    with col_peak2:
+        prev_peak_day_file = st.file_uploader(
+            "前年 グラフ用データCSV",
+            type=["csv"],
+            accept_multiple_files=False,
+            key="prev_peak_day",
+            help="前年の最大デマンド発生日の30分間隔データ",
+        )
+
+    st.subheader("4. 追加指示 (オプション)")
     additional_instructions = st.text_area(
         "追加の指示",
         placeholder="例: 重要なトレンドのみを箇条書きでまとめてください。",
@@ -530,12 +574,43 @@ def render_graph_analysis_tab() -> None:
                     except Exception as exc:
                         st.warning(f"気温CSVの読み込みに失敗しました: {exc}")
 
+                # 最大デマンド発生日データをパース (オプション)
+                curr_peak_data: PeakDayPowerData | None = None
+                prev_peak_data: PeakDayPowerData | None = None
+
+                if curr_peak_day_file:
+                    peak_path = tmpdir / curr_peak_day_file.name
+                    peak_path.write_bytes(curr_peak_day_file.getvalue())
+                    try:
+                        curr_peak_data = parse_peak_day_power_csv(peak_path)
+                        st.info(
+                            f"当年デマンドデータ読み込み: {curr_peak_data.peak_date}, "
+                            f"最大デマンド: {curr_peak_data.peak_power_kw:.1f} kW "
+                            f"@ {curr_peak_data.peak_time}"
+                        )
+                    except Exception as exc:
+                        st.warning(f"当年グラフ用データの読み込みに失敗しました: {exc}")
+
+                if prev_peak_day_file:
+                    prev_peak_path = tmpdir / prev_peak_day_file.name
+                    prev_peak_path.write_bytes(prev_peak_day_file.getvalue())
+                    try:
+                        prev_peak_data = parse_peak_day_power_csv(prev_peak_path)
+                        st.info(
+                            f"前年デマンドデータ読み込み: {prev_peak_data.peak_date}, "
+                            f"最大デマンド: {prev_peak_data.peak_power_kw:.1f} kW "
+                            f"@ {prev_peak_data.peak_time}"
+                        )
+                    except Exception as exc:
+                        st.warning(f"前年グラフ用データの読み込みに失敗しました: {exc}")
+
                 status.update(label="分析中...", state="running")
                 try:
                     results = analyze_graphs_with_context(
                         graph_paths=graph_paths,
                         monthly_report=monthly_report,
                         temperature=temperature,
+                        peak_day_data=(curr_peak_data, prev_peak_data),
                         base_prompt=prompt,
                         llm=llm,
                     )
