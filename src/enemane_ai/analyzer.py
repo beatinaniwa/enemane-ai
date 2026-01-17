@@ -70,6 +70,11 @@ OUTPUT_FORMAT_INSTRUCTION = dedent(
       {"graph_name": "今月の最大電力内訳", "item_name": "最大デマンド発生時内訳", "comment": "..."}
     ]
     ```
+    ※【当年最大デマンド発生日データ】と【前年最大デマンド発生日データ】が提供されている場合:
+    - 前年との最大デマンド値の比較 (差分とパーセント) を必ず含める
+    - ピーク発生時刻の比較 (同一か変化したか) を言及
+    - 回路別の増減要因の分析を含める (どの回路が増加/減少に寄与したか)
+    - 前年に比べて負荷が大きく増加/減少した回路を特定し、その要因を推測
 
     ■ 各項目のコメント内容:
 
@@ -295,6 +300,66 @@ class MonthlyPowerCalendarData:
     max_demand_kw: float = 0.0
     weekday_avg_kwh: float = 0.0
     weekend_avg_kwh: float = 0.0
+
+
+@dataclass
+class PeakDayCircuitData:
+    """回路別30分間隔データ"""
+
+    circuit_name: str  # "受電電力", "1F事務所SR_電灯", etc.
+    values: list[float] = field(default_factory=list)  # 48 values for 30-min intervals
+
+
+@dataclass
+class PeakDayPowerData:
+    """最大デマンド発生日の詳細データ (グラフ用データ(4))"""
+
+    peak_date: str  # "2024/10/02"
+    time_slots: list[str] = field(default_factory=list)  # ["0:00", "0:30", ..., "23:30"]
+    circuits: list[PeakDayCircuitData] = field(default_factory=list)
+
+    @property
+    def peak_time(self) -> str:
+        """最大デマンド発生時刻を返す (受電電力の最大値の時刻)"""
+        for circuit in self.circuits:
+            if circuit.circuit_name == "受電電力":
+                if not circuit.values:
+                    return ""
+                max_idx = max(range(len(circuit.values)), key=lambda i: circuit.values[i])
+                return self.time_slots[max_idx] if max_idx < len(self.time_slots) else ""
+        return ""
+
+    @property
+    def peak_power_kw(self) -> float:
+        """最大デマンド値 (受電電力の最大値 * 2 for kW)"""
+        for circuit in self.circuits:
+            if circuit.circuit_name == "受電電力":
+                if not circuit.values:
+                    return 0.0
+                # kWh (30min) -> kW: multiply by 2
+                return max(circuit.values) * 2
+        return 0.0
+
+    def get_circuit_power_at_peak(self) -> dict[str, float]:
+        """ピーク時刻における各回路の電力値を返す"""
+        result: dict[str, float] = {}
+        peak_idx: int | None = None
+
+        # Find peak time index from 受電電力
+        for circuit in self.circuits:
+            if circuit.circuit_name == "受電電力":
+                if circuit.values:
+                    peak_idx = max(range(len(circuit.values)), key=lambda i: circuit.values[i])
+                break
+
+        if peak_idx is None:
+            return result
+
+        for circuit in self.circuits:
+            if peak_idx < len(circuit.values):
+                result[circuit.circuit_name] = circuit.values[peak_idx]
+
+        return result
 
 
 def parse_monthly_report_csv(path: Path) -> MonthlyReportData:
@@ -765,6 +830,86 @@ def parse_power_30min_csv(path: Path) -> MonthlyPowerCalendarData:
     )
 
 
+def parse_peak_day_power_csv(path: Path) -> PeakDayPowerData:
+    """
+    グラフ用データ(4) CSVをパースして構造化データに変換。
+
+    CSVフォーマット:
+    - 行1: ヘッダー説明 "(4) 詳細データ..."
+    - 行2: 日付と48時間スロット "2024/10/02,0:00,0:30,1:00,...,23:30"
+    - 行3+: 回路名と48値 "受電電力,4.18,4.18,4.03,..."
+
+    Args:
+        path: CSVファイルパス
+
+    Returns:
+        PeakDayPowerData: パースされたピーク日電力データ
+
+    Raises:
+        ValueError: CSVフォーマットが不正な場合
+    """
+    rows = _read_csv_rows(path)
+
+    if len(rows) < 3:
+        msg = f"グラフ用データ(4) CSV {path.name} のフォーマットが不正です(行数不足)"
+        raise ValueError(msg)
+
+    # 行2: 日付と時間スロット
+    date_time_row = rows[1]
+    if len(date_time_row) < 2:
+        msg = f"グラフ用データ(4) CSV {path.name} の時間スロットが不足しています"
+        raise ValueError(msg)
+
+    peak_date = date_time_row[0].strip()
+    # 時間スロットは最大48個まで (0:00〜23:30)
+    max_slots = min(len(date_time_row) - 1, 48)
+    time_slots = [cell.strip() for cell in date_time_row[1 : max_slots + 1]]
+
+    # 日付フォーマット検証
+    date_match = re.match(r"(\d{4})/(\d{1,2})/(\d{1,2})", peak_date)
+    if not date_match:
+        msg = f"グラフ用データ(4) CSV {path.name} の日付フォーマットが不正です: {peak_date}"
+        raise ValueError(msg)
+
+    # 行3以降: 回路データ
+    circuits: list[PeakDayCircuitData] = []
+
+    for row in rows[2:]:
+        if not row or not row[0].strip():
+            continue
+
+        circuit_name = row[0].strip()
+        values: list[float] = []
+
+        # 時間スロット数に合わせて値を取得
+        for cell in row[1 : len(time_slots) + 1]:
+            try:
+                values.append(float(cell))
+            except ValueError:
+                values.append(0.0)
+
+        # 時間スロット数に満たない場合は0で埋める
+        while len(values) < len(time_slots):
+            values.append(0.0)
+
+        circuits.append(
+            PeakDayCircuitData(
+                circuit_name=circuit_name,
+                values=values,
+            )
+        )
+
+    if not circuits:
+        msg = f"グラフ用データ(4) CSV {path.name} に有効な回路データがありません"
+        raise ValueError(msg)
+
+    return PeakDayPowerData(
+        peak_date=peak_date,
+        time_slots=time_slots,
+        circuits=circuits,
+    )
+
+
 def build_power_calendar_context(data: MonthlyPowerCalendarData) -> str:
     """電力カレンダー分析用のコンテキスト文字列を構築。"""
     parts: list[str] = []
@@ -895,6 +1040,107 @@ def build_power_calendar_extended_context(
             f"最低{curr_temp.min_temp:.1f}℃, 平均{curr_temp.avg_temp:.1f}℃ "
             f"(前年比 最高{max_diff:+.1f}℃, 平均{avg_diff:+.1f}℃)"
         )
+
+    return "\n".join(parts)
+
+
+def build_peak_day_comparison_context(
+    curr_peak: PeakDayPowerData | None,
+    prev_peak: PeakDayPowerData | None = None,
+) -> str:
+    """
+    最大デマンド発生日の前年比較コンテキスト文字列を構築。
+
+    T5グラフ (最大デマンド発生時) の分析用コンテキストを生成する。
+
+    Args:
+        curr_peak: 当年の最大デマンド発生日データ
+        prev_peak: 前年の最大デマンド発生日データ (オプション)
+
+    Returns:
+        str: プロンプト用のコンテキスト文字列
+    """
+    if curr_peak is None:
+        return ""
+
+    parts: list[str] = []
+
+    # 当年データ
+    parts.append(f"【当年最大デマンド発生日データ ({curr_peak.peak_date})】")
+    parts.append(f"- 最大デマンド発生時刻: {curr_peak.peak_time}")
+    parts.append(f"- 最大デマンド値: {curr_peak.peak_power_kw:.1f} kW")
+
+    # 当年ピーク時の回路別内訳
+    curr_peak_circuits = curr_peak.get_circuit_power_at_peak()
+    if curr_peak_circuits:
+        parts.append("- ピーク時刻の回路別内訳 (kWh/30分):")
+        # 電力順でソート (受電電力を除く)
+        sorted_circuits = sorted(
+            [(name, val) for name, val in curr_peak_circuits.items() if name != "受電電力"],
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        for circuit_name, value in sorted_circuits[:10]:  # 上位10回路
+            kw_value = value * 2  # kWh/30min -> kW
+            parts.append(f"  - {circuit_name}: {kw_value:.1f} kW ({value:.2f} kWh)")
+
+    # 前年データ (存在する場合)
+    if prev_peak:
+        parts.append("")
+        parts.append(f"【前年最大デマンド発生日データ ({prev_peak.peak_date})】")
+        parts.append(f"- 最大デマンド発生時刻: {prev_peak.peak_time}")
+        parts.append(f"- 最大デマンド値: {prev_peak.peak_power_kw:.1f} kW")
+
+        # 前年ピーク時の回路別内訳
+        prev_peak_circuits = prev_peak.get_circuit_power_at_peak()
+        if prev_peak_circuits:
+            parts.append("- ピーク時刻の回路別内訳 (kWh/30分):")
+            sorted_circuits = sorted(
+                [(name, val) for name, val in prev_peak_circuits.items() if name != "受電電力"],
+                key=lambda x: x[1],
+                reverse=True,
+            )
+            for circuit_name, value in sorted_circuits[:10]:
+                kw_value = value * 2
+                parts.append(f"  - {circuit_name}: {kw_value:.1f} kW ({value:.2f} kWh)")
+
+        # 前年比較
+        parts.append("")
+        parts.append("【前年比較】")
+        power_diff = curr_peak.peak_power_kw - prev_peak.peak_power_kw
+        if prev_peak.peak_power_kw > 0:
+            power_pct = (power_diff / prev_peak.peak_power_kw) * 100
+            parts.append(f"- 最大デマンド変化: {power_diff:+.1f} kW ({power_pct:+.1f}%)")
+        else:
+            parts.append(f"- 最大デマンド変化: {power_diff:+.1f} kW")
+
+        # 発生時刻の比較
+        if curr_peak.peak_time and prev_peak.peak_time:
+            if curr_peak.peak_time == prev_peak.peak_time:
+                parts.append(f"- 発生時刻: 同一 ({curr_peak.peak_time})")
+            else:
+                parts.append(f"- 発生時刻: {prev_peak.peak_time} → {curr_peak.peak_time}")
+
+        # 回路別変化 (主要回路のみ)
+        if curr_peak_circuits and prev_peak_circuits:
+            parts.append("- 回路別変化 (主要回路):")
+            common_circuits = set(curr_peak_circuits.keys()) & set(prev_peak_circuits.keys())
+            changes: list[tuple[str, float, float, float]] = []
+            for circuit_name in common_circuits:
+                if circuit_name == "受電電力":
+                    continue
+                curr_val = curr_peak_circuits[circuit_name] * 2  # kW
+                prev_val = prev_peak_circuits[circuit_name] * 2  # kW
+                diff = curr_val - prev_val
+                if abs(diff) >= 0.5:  # 0.5kW以上の変化のみ表示
+                    changes.append((circuit_name, curr_val, prev_val, diff))
+
+            # 変化量の大きい順にソート
+            changes.sort(key=lambda x: abs(x[3]), reverse=True)
+            for circuit_name, curr_val, prev_val, diff in changes[:5]:
+                parts.append(
+                    f"  - {circuit_name}: {prev_val:.1f} kW → {curr_val:.1f} kW ({diff:+.1f} kW)"
+                )
 
     return "\n".join(parts)
 
