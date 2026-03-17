@@ -22,6 +22,7 @@ from enemane_ai.analyzer import (
     OUTPUT_FORMAT_INSTRUCTION,
     PRESET_PROMPT,
     ArticleProgressInfo,
+    FacilityProfile,
     GeminiGraphLanguageModel,
     GraphLanguageModel,
     MonthlyPowerCalendarData,
@@ -35,6 +36,8 @@ from enemane_ai.analyzer import (
     collect_graph_entries,
     collect_relevant_articles,
     evaluate_summary_quality,
+    parse_circuit_mapping,
+    parse_facility_profiles,
     parse_monthly_report_csv,
     parse_peak_day_power_csv,
     parse_power_30min_csv,
@@ -373,6 +376,8 @@ def analyze_graphs_with_context(
     peak_day_data: tuple[PeakDayPowerData | None, PeakDayPowerData | None] | None,
     base_prompt: str,
     llm: GraphLanguageModel,
+    facility_profiles: list[FacilityProfile] | None = None,
+    circuit_mapping: dict[str, str] | None = None,
 ) -> list[OutputRow]:
     """
     グラフ画像を補助データのコンテキスト付きで分析し、OutputRowのリストを返す。
@@ -384,17 +389,21 @@ def analyze_graphs_with_context(
         peak_day_data: 最大デマンド発生日データ (当年, 前年) (オプション)
         base_prompt: ベースプロンプト
         llm: LLMクライアント
+        facility_profiles: 施設属性データ (オプション)
+        circuit_mapping: 回路名→用途マッピング (オプション)
 
     Returns:
         list[OutputRow]: 分析結果のリスト
     """
     # 補助データコンテキストを構築
-    context = build_supplementary_context(monthly_report, temperature)
+    context = build_supplementary_context(
+        monthly_report, temperature, facility_profiles, circuit_mapping
+    )
 
     # 最大デマンド発生日コンテキストを追加
     if peak_day_data:
         curr_peak, prev_peak = peak_day_data
-        peak_context = build_peak_day_comparison_context(curr_peak, prev_peak)
+        peak_context = build_peak_day_comparison_context(curr_peak, prev_peak, circuit_mapping)
         if peak_context:
             context = f"{context}\n\n{peak_context}" if context else peak_context
 
@@ -515,7 +524,23 @@ def render_graph_analysis_tab() -> None:
             help="前年の最大デマンド発生日の30分間隔データ",
         )
 
-    st.subheader("4. 追加指示 (オプション)")
+    st.subheader("4. 施設属性 (オプション)")
+    facility_text = st.text_area(
+        "施設属性情報 (1行1エントリ: フロア,施設タイプ,営業日,備考)",
+        placeholder="1F,ショールーム,月火水木金土,来場者数で変動\n3F,オフィス,月火水木金,",
+        height=80,
+        key="graph_facility_profiles",
+    )
+
+    st.subheader("5. 回路名称マッピング (オプション)")
+    circuit_mapping_text = st.text_area(
+        "回路名称→用途 (1行1エントリ: 回路名:用途 または 回路名→用途)",
+        placeholder="1F事務所SR_電灯:ショールーム照明\n3F事務所_電灯→オフィス照明",
+        height=80,
+        key="graph_circuit_mapping",
+    )
+
+    st.subheader("6. 追加指示 (オプション)")
     additional_instructions = st.text_area(
         "追加の指示",
         placeholder="例: 重要なトレンドのみを箇条書きでまとめてください。",
@@ -604,6 +629,24 @@ def render_graph_analysis_tab() -> None:
                     except Exception as exc:
                         st.warning(f"前年グラフ用データの読み込みに失敗しました: {exc}")
 
+                # 施設属性をパース
+                facility_profiles: list[FacilityProfile] | None = None
+                if facility_text.strip():
+                    profiles, profile_warnings = parse_facility_profiles(facility_text)
+                    for w in profile_warnings:
+                        st.warning(f"施設属性: {w}")
+                    if profiles:
+                        facility_profiles = profiles
+
+                # 回路マッピングをパース
+                circuit_mapping: dict[str, str] | None = None
+                if circuit_mapping_text.strip():
+                    mapping, mapping_warnings = parse_circuit_mapping(circuit_mapping_text)
+                    for w in mapping_warnings:
+                        st.warning(f"回路マッピング: {w}")
+                    if mapping:
+                        circuit_mapping = mapping
+
                 status.update(label="分析中...", state="running")
                 try:
                     results = analyze_graphs_with_context(
@@ -613,6 +656,8 @@ def render_graph_analysis_tab() -> None:
                         peak_day_data=(curr_peak_data, prev_peak_data),
                         base_prompt=prompt,
                         llm=llm,
+                        facility_profiles=facility_profiles,
+                        circuit_mapping=circuit_mapping,
                     )
                 except Exception as exc:
                     status.update(label="失敗", state="error")
@@ -711,7 +756,15 @@ def render_calendar_analysis_tab() -> None:
         help="形式: 日付時刻, 気温 (例: 2024/10/1 1:00, 25.0)。気温との相関分析に使用します。",
     )
 
-    st.subheader("4. 追加指示 (オプション)")
+    st.subheader("4. 施設属性 (オプション)")
+    calendar_facility_text = st.text_area(
+        "施設属性情報 (1行1エントリ: フロア,施設タイプ,営業日,備考)",
+        placeholder="1F,ショールーム,月火水木金土,来場者数で変動\n3F,オフィス,月火水木金,",
+        height=80,
+        key="calendar_facility_profiles",
+    )
+
+    st.subheader("5. 追加指示 (オプション)")
     additional_instructions = st.text_area(
         "追加の指示",
         placeholder="例: 省エネ改善の示唆を重点的に分析してください。",
@@ -797,11 +850,21 @@ def render_calendar_analysis_tab() -> None:
                     st.error(f"PDF処理に失敗しました: {exc}")
                     return
 
+                # 施設属性をパース
+                calendar_facility_profiles: list[FacilityProfile] | None = None
+                if calendar_facility_text.strip():
+                    profiles, profile_warnings = parse_facility_profiles(calendar_facility_text)
+                    for w in profile_warnings:
+                        st.warning(f"施設属性: {w}")
+                    if profiles:
+                        calendar_facility_profiles = profiles
+
                 # コンテキストを構築 (拡張版を使用)
                 context = build_power_calendar_extended_context(
                     curr_power=curr_power_data,
                     prev_power=prev_power_data,
                     temperature=temperature_data,
+                    facility_profiles=calendar_facility_profiles,
                 )
 
                 # プロンプトを構築

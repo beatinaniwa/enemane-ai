@@ -2,13 +2,20 @@ from pathlib import Path
 
 from PIL import Image
 
-from enemane_ai.analyzer import PRESET_PROMPT
+from enemane_ai.analyzer import (
+    PRESET_PROMPT,
+    FacilityProfile,
+    MonthlyReportData,
+    PeakDayCircuitData,
+    PeakDayPowerData,
+)
 from enemane_ai.app import (
     AnalyzedGraph,
     CalendarAnalysisRow,
     OutputRow,
     ResultRow,
     analyze_files,
+    analyze_graphs_with_context,
     build_result_rows,
     export_calendar_analysis_csv,
     export_table_csv,
@@ -20,15 +27,18 @@ from enemane_ai.app import (
 
 
 class DummyLLM:
-    def __init__(self) -> None:
+    def __init__(self, response: str = "graph") -> None:
         self.calls = 0
+        self.last_prompt: str | None = None
 
     def comment_on_graph(self, image, prompt):  # type: ignore[no-untyped-def]
         self.calls += 1
+        self.last_prompt = prompt
         return "graph"
 
     def comment_on_text(self, text, prompt):  # type: ignore[no-untyped-def]
         self.calls += 1
+        self.last_prompt = prompt
         return "text"
 
 
@@ -278,3 +288,88 @@ def test_export_calendar_analysis_csv_has_bom_and_correct_headers() -> None:
     assert lines[0] == "項目,事実+仮説"
     assert "全体傾向,10月は減少傾向" in lines[1]
     assert "最大需要日の確認,22日が最大" in lines[2]
+
+
+# =============================================================================
+# 層3: 統合テスト — analyze_graphs_with_context
+# =============================================================================
+
+
+def test_analyze_graphs_with_context_includes_facility_profiles(tmp_path: Path) -> None:
+    """施設属性がプロンプトに反映されることを検証。"""
+    img_path = tmp_path / "plot.png"
+    Image.new("RGB", (10, 10), "white").save(img_path)
+
+    llm = DummyLLM()
+    profiles = [FacilityProfile("ショールーム", "1F", ("月", "火", "水", "木", "金", "土"))]
+
+    analyze_graphs_with_context(
+        graph_paths=[img_path],
+        monthly_report=None,
+        temperature=None,
+        peak_day_data=None,
+        base_prompt=PRESET_PROMPT,
+        llm=llm,
+        facility_profiles=profiles,
+    )
+
+    assert llm.last_prompt is not None
+    assert "施設属性情報" in llm.last_prompt
+    assert "ショールーム" in llm.last_prompt
+
+
+def test_analyze_graphs_with_context_includes_circuit_mapping(tmp_path: Path) -> None:
+    """回路マッピングがプロンプトに反映されることを検証。"""
+    img_path = tmp_path / "plot.png"
+    Image.new("RGB", (10, 10), "white").save(img_path)
+
+    llm = DummyLLM()
+    mapping = {"1F電灯": "ショールーム照明"}
+    report = MonthlyReportData(
+        month_label="2023年10月",
+        max_power_daily=[30.0],
+        circuits={"1F電灯": [100.0]},
+        total_power_daily=[300.0],
+    )
+
+    analyze_graphs_with_context(
+        graph_paths=[img_path],
+        monthly_report=report,
+        temperature=None,
+        peak_day_data=None,
+        base_prompt=PRESET_PROMPT,
+        llm=llm,
+        circuit_mapping=mapping,
+    )
+
+    assert llm.last_prompt is not None
+    assert "1F電灯(ショールーム照明)" in llm.last_prompt
+    assert "回路名称→用途" in llm.last_prompt
+
+
+def test_analyze_graphs_with_context_includes_3point_context(tmp_path: Path) -> None:
+    """T5三点比較がプロンプトに含まれることを検証。"""
+    img_path = tmp_path / "plot.png"
+    Image.new("RGB", (10, 10), "white").save(img_path)
+
+    llm = DummyLLM()
+    curr_peak = PeakDayPowerData(
+        peak_date="2024/10/02",
+        time_slots=["14:00", "14:30", "15:00"],
+        circuits=[
+            PeakDayCircuitData("受電電力", [40.0, 42.0, 38.0]),
+            PeakDayCircuitData("1F電灯", [10.0, 12.0, 9.0]),
+        ],
+    )
+
+    analyze_graphs_with_context(
+        graph_paths=[img_path],
+        monthly_report=None,
+        temperature=None,
+        peak_day_data=(curr_peak, None),
+        base_prompt=PRESET_PROMPT,
+        llm=llm,
+    )
+
+    assert llm.last_prompt is not None
+    assert "3点比較" in llm.last_prompt

@@ -83,17 +83,35 @@ OUTPUT_FORMAT_INSTRUCTION = dedent(
     - 前年との比較は含めない
 
     「前年比較」: 前年同月との差分・増減を説明
-    - 例: 計測回路合計は10,588kWhで前年同月比+468kWh(+4.1%)増加
+    - 例: 計測回路合計は前年同月の10,120 kWhから10,588 kWhへ+468 kWh(+4.6%)増加
+    - 比較値を述べる際は必ず比較元の値を併記
     - どの回路が増減したかを具体的に記載
 
-    ■ 気温データとの相関【重要】:
+    ■ kW/kWh混在禁止ルール:
+    - 各コメント項目は「kW(最大電力/デマンド)」または「kWh(電力使用量)」のどちらか一方に絞って記述
+    - 1文中でkWとkWhを切り替えない
+
+    ■ 気温データとの相関【重要】(kW/kWh別):
     【気温データ】が提供されている場合は、必ず以下のように気温と電力消費の関係をコメントに含める:
-    - 最大電力[kW]: 気温が高い/低い日にピークが発生した可能性を言及
-    - 電力使用量[kWh]: 気温差(前年比○℃)による冷暖房負荷の増減を言及
+    - 電力使用量[kWh]: 気温の影響を受けやすい(冷暖房稼働時間に直結)
+      - 気温差(前年比○℃)による冷暖房負荷の増減を言及
+    - 最大電力[kW]: 気温だけでなく同時稼働タイミングに依存し、気温との直接的因果は限定的
+      - kWの前年差については気温のみで説明しない(同時稼働要因を考慮)
     - 前年比較: 気温差が電力使用量の増減に与えた影響を必ず記載
       例: 「前年同月比で最高気温+3.6℃、平均気温+2.1℃となった気温差による冷房設備の
            負荷増大が電力使用量増加の主要因である可能性があります」
     - 日別推移: 特定日の気温と電力ピークの相関を言及
+    - 気温と電力消費の相関が明確でない場合は、無理に結びつけない
+    - 中間期(春秋)は冷暖房負荷が小さいため、気温影響は限定的
+
+    ■ 気温指標の使い分け:
+    - 平均気温: 月全体のkWh増減の主因分析
+    - 最高気温: 冷房ピーク(夏期kWピーク)の分析
+    - 最低気温: 暖房起動(冬期の底冷え、早朝暖房立ち上げ)の分析
+
+    ■ 各項目の独立性【重要】
+    - 各出力項目は独立した観点で記述し、他の項目と内容が重複しないようにする
+    - 同一テーマに触れる必要がある場合は、補足・別の視点からの分析として記述
 
     ■ 前年比較の計算:
     - 【前年同月データ】の数値を使って前年比を計算
@@ -122,11 +140,26 @@ CALENDAR_ANALYSIS_PROMPT = dedent(
        - 最大電力使用量日: 1日の合計電力使用量(kWh)が最大の日
        - 最大需要電力日: 30分間隔のピーク値(kW)が最大の日
        - 前年データがある場合: 前年同日との比較
-    3. 平日・休日差: 稼働日と非稼働日の消費パターンの違い
+    3. 稼働日・非稼働日パターン: 稼働日と非稼働日の消費パターンの違い
+       - 【施設属性情報】がある場合は営業日カレンダーに基づいて判断
+       - 施設属性がない場合は平日/休日(土日)で分析
+       - 曜日ごとの特徴的パターンを分析(月曜の立ち上げ負荷、土曜営業の有無等)
        - 前年データがある場合: 前年との平日/休日平均の比較
     4. 時間帯別パターン: ピーク時間帯、ベースロード
     5. 省エネ改善の示唆: 削減余地のある時間帯や日の特定
+       - 柔らかいトーンで記述(「〜をご検討ください」「〜の見直し余地があります」)
        - 前年比で増加している場合はその要因分析を含める
+
+    ■ 表現ルール【厳守】
+    - 強い断定表現は禁止。推測・因果関係には以下の表現に統一:
+      - 「〜可能性があります」「〜と考えられます」「〜かもしれません」「〜の傾向が見られます」
+    - 使用禁止: 「〜が原因です」「〜に違いありません」(推測を事実として述べる表現)
+    - 数値の読み取り事実のみ断定可。因果関係や要因推測は必ず推測語を使用
+
+    ■ 施設属性に基づく分析【重要】
+    【施設属性情報】が提供されている場合:
+    - 各フロア/施設の営業形態に応じた電力パターンを考慮
+    - 営業日情報をもとに「稼働日/非稼働日」を判断(単純な平日/休日ではない)
 
     ■ 気温データとの相関【重要】
     【気温データ】が提供されている場合は、必ず以下のように気温と電力消費の関係をコメントに含める:
@@ -135,6 +168,8 @@ CALENDAR_ANALYSIS_PROMPT = dedent(
     - 電力使用量の増減が気温要因か、その他要因かを推測
       例: 「前年同月比で平均気温+2.1℃となった気温差による冷房設備の
            負荷増大が電力使用量増加の主要因である可能性があります」
+    - 気温と電力消費の相関が明確でない場合は、無理に結びつけない
+    - 中間期(春秋)は冷暖房負荷が小さいため、気温影響は限定的
     """
 )
 
@@ -159,6 +194,14 @@ CALENDAR_OUTPUT_FORMAT = dedent(
     - 気温データがある場合は気温との相関を必ず含める
     - 事実と仮説を自然な文章で接続する(ラベル表記禁止)
     - 推測で数値を作らない。読めない値は「不明」とする
+
+    ■ 表現ルール【厳守】
+    - 強い断定表現は禁止。推測・因果関係には推測語を使用
+    - 改善提案は柔らかいトーンで記述(「〜をご検討ください」「〜の見直し余地があります」)
+
+    ■ 各項目の独立性【重要】
+    - 各出力項目は独立した観点で記述し、他の項目と内容が重複しないようにする
+    - 同一テーマに触れる必要がある場合は、補足・別の視点からの分析として記述
     """
 )
 
@@ -221,6 +264,64 @@ PRESET_PROMPT = dedent(
       今月は **86.9 kW** で前年7月 **90.9 kW** を下回り、12か月内のピーク
       **100.5 kW**(集約区間)より低水準で推移しました。夏期ピークの同時起動が抑えられた
       可能性があるため、引き続きピーク帯の段階投入と需要監視アラート90%の設定を推奨します。
+
+    ■ 表現ルール【厳守】
+    - 強い断定表現は禁止。推測・因果関係には以下の表現に統一:
+      - 「〜可能性があります」「〜と考えられます」「〜かもしれません」「〜の傾向が見られます」
+    - 使用禁止: 「〜が原因です」「〜に違いありません」(推測を事実として述べる表現)
+    - 数値の読み取り事実のみ断定可。因果関係や要因推測は必ず推測語を使用
+
+    ■ 改善提案の表現トーン【厳守】
+    - 運用改善案・省エネ提案は柔らかいトーンに統一:
+      - 「〜をご検討ください」「〜の見直し余地があります」「〜の余地があると考えられます」
+    - 使用禁止: 「〜すべきです」「〜する必要があります」「〜しなければなりません」
+    - 「設定最適化」「運用改善」等の曖昧なワードは、具体化できない場合は使用しない
+      - 良い例: 「空調の設定温度を1℃緩和することをご検討ください」
+      - 悪い例: 「設定最適化をご検討ください」
+
+    ■ 前月比・前年比の記述ルール【厳守】
+    - 比較値(差分やパーセント)を述べる際は、必ず比較元の値を併記
+      - 良い例: 「前月の12,500 kWhから+596 kWh(+4.8%)増加し、13,096 kWhとなりました」
+      - 悪い例: 「+596 kWh増加しました」(比較元が不明)
+
+    ■ kW/kWh の混在禁止【厳守】
+    - 各コメント項目は「kW(最大電力/デマンド)」または「kWh(電力使用量)」のどちらか一方に絞って記述
+    - T1+T2: 「最大電力[kW]」のコメントにkWh記述を含めない。逆も同様
+    - T3回路別内訳: kWh(使用量)ベースの構成比のみ
+    - T5最大デマンド: kW(需要電力)ベースのみ
+    - 各文は「kW」または「kWh」のどちらか一方のみを扱い、1文中で切り替えない
+
+    ■ T5 最大デマンド分析【厳守】
+    - 前時限→ピーク時限→次時限の3点を必ず比較
+    - ピークの形状(急上昇型/緩やか型/台形型)を分析
+    - 回路別にも3点の推移を記述し、ピーク形成に寄与した回路を特定
+
+    ■ 施設属性に基づく分析【重要】
+    【施設属性情報】が提供されている場合:
+    - 各フロア/施設の営業形態に応じた電力パターンを考慮
+    - 営業日情報をもとに「稼働日/非稼働日」を判断(単純な平日/休日ではない)
+
+    ■ 曜日別分析【重要】
+    - 曜日ごとの特徴的パターンがあれば言及:
+      - 月曜日: 週明け立ち上げ負荷(空調冷やし込み等)
+      - 土日: 施設属性によっては稼働日。一律に「休日=低い」としない
+    - 【施設属性情報】がある場合は営業日カレンダーに基づいて分析
+
+    ■ 増加要因の推測ルール【重要】
+    - 詳細な要因推測(稼働時間の変化、負荷種類の差等)は、30分間隔データ等の裏付けがある場合にのみ記述
+    - データがない場合は「詳細な要因分析には30分間隔データの照合が必要です」と補足
+
+    ■ 回路別変化の時系列記述【重要】
+    - 回路別の増減はピーク時点の値のみでなく、時系列での変化パターンを記述
+    - ベースロードとの比較を通じて、常時増加 vs ピーク集中を分析
+
+    ■ 補助データの提案
+    - 分析精度向上に有効な補助データがある場合は、1文で簡潔に言及
+      例: 「来場者数データと照合することでショールームの電力変動要因をより正確に分析できます」
+
+    ■ 回路名称の解釈
+    【回路名称→用途】が提供されている場合は、用途名称を活用して分かりやすく説明する
+      例: 「1F事務所SR_電灯(ショールーム照明)が構成比22.6%で最大」
     """
 )
 
@@ -228,6 +329,7 @@ PRESET_PROMPT = dedent(
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tiff"}
 CSV_EXTENSIONS = {".csv"}
 DEFAULT_MODEL_NAME = "gemini-3-pro-preview"
+RECEIVED_POWER_CIRCUIT = "受電電力"
 
 
 @dataclass
@@ -318,48 +420,207 @@ class PeakDayPowerData:
     time_slots: list[str] = field(default_factory=list)  # ["0:00", "0:30", ..., "23:30"]
     circuits: list[PeakDayCircuitData] = field(default_factory=list)
 
+    def _find_peak_index(self) -> int | None:
+        """受電電力の最大値インデックスを返す。受電電力がない/空の場合はNone。"""
+        for circuit in self.circuits:
+            if circuit.circuit_name == RECEIVED_POWER_CIRCUIT:
+                if circuit.values:
+                    return max(range(len(circuit.values)), key=lambda i: circuit.values[i])
+                return None
+        return None
+
     @property
     def peak_time(self) -> str:
         """最大デマンド発生時刻を返す (受電電力の最大値の時刻)"""
-        for circuit in self.circuits:
-            if circuit.circuit_name == "受電電力":
-                if not circuit.values:
-                    return ""
-                max_idx = max(range(len(circuit.values)), key=lambda i: circuit.values[i])
-                return self.time_slots[max_idx] if max_idx < len(self.time_slots) else ""
-        return ""
+        peak_idx = self._find_peak_index()
+        if peak_idx is None:
+            return ""
+        return self.time_slots[peak_idx] if peak_idx < len(self.time_slots) else ""
 
     @property
     def peak_power_kw(self) -> float:
         """最大デマンド値 (受電電力の最大値 * 2 for kW)"""
+        peak_idx = self._find_peak_index()
+        if peak_idx is None:
+            return 0.0
         for circuit in self.circuits:
-            if circuit.circuit_name == "受電電力":
-                if not circuit.values:
-                    return 0.0
-                # kWh (30min) -> kW: multiply by 2
-                return max(circuit.values) * 2
+            if circuit.circuit_name == RECEIVED_POWER_CIRCUIT:
+                return circuit.values[peak_idx] * 2  # kWh (30min) -> kW
         return 0.0
 
     def get_circuit_power_at_peak(self) -> dict[str, float]:
         """ピーク時刻における各回路の電力値を返す"""
-        result: dict[str, float] = {}
-        peak_idx: int | None = None
-
-        # Find peak time index from 受電電力
-        for circuit in self.circuits:
-            if circuit.circuit_name == "受電電力":
-                if circuit.values:
-                    peak_idx = max(range(len(circuit.values)), key=lambda i: circuit.values[i])
-                break
-
+        peak_idx = self._find_peak_index()
         if peak_idx is None:
-            return result
+            return {}
 
+        return {
+            circuit.circuit_name: circuit.values[peak_idx]
+            for circuit in self.circuits
+            if peak_idx < len(circuit.values)
+        }
+
+    def get_circuit_power_3point(self) -> dict[str, tuple[float | None, float, float | None]]:
+        """前時限→ピーク→次時限の3点データを返す。
+
+        Returns:
+            回路名 -> (前時限値, ピーク値, 次時限値) のdict。
+            前時限/次時限が存在しない場合(先頭/末尾スロット)はNone。
+        """
+        peak_idx = self._find_peak_index()
+        if peak_idx is None:
+            return {}
+
+        result: dict[str, tuple[float | None, float, float | None]] = {}
         for circuit in self.circuits:
-            if peak_idx < len(circuit.values):
-                result[circuit.circuit_name] = circuit.values[peak_idx]
+            if peak_idx >= len(circuit.values):
+                continue
+            peak_val = circuit.values[peak_idx]
+            prev_val = circuit.values[peak_idx - 1] if peak_idx > 0 else None
+            next_val = circuit.values[peak_idx + 1] if peak_idx + 1 < len(circuit.values) else None
+            result[circuit.circuit_name] = (prev_val, peak_val, next_val)
 
         return result
+
+
+@dataclass
+class FacilityProfile:
+    """施設属性データ"""
+
+    facility_type: str  # "ショールーム", "オフィス", "工場" 等
+    floor_label: str  # "1F", "3F" 等
+    business_days: tuple[str, ...]  # 正規化済み: ("月","火","水","木","金","土")
+    notes: str = ""
+
+
+_VALID_WEEKDAYS = frozenset("月火水木金土日")
+
+
+def parse_business_days(s: str) -> tuple[str, ...]:
+    """曜日文字列をバリデーションしてタプルに変換。"""
+    days: list[str] = []
+    for ch in s.replace(",", "").replace("、", "").replace(" ", "").replace("　", ""):
+        if ch in _VALID_WEEKDAYS and ch not in days:
+            days.append(ch)
+    return tuple(days)
+
+
+def parse_facility_profiles(text: str) -> tuple[list[FacilityProfile], list[str]]:
+    """
+    施設属性テキストをパースする。
+
+    入力形式: 1行1エントリ、カンマ区切り
+    「フロア,施設タイプ,営業日,備考」
+
+    Returns:
+        (有効なプロファイルリスト, 警告メッセージリスト)
+    """
+    profiles: list[FacilityProfile] = []
+    warnings: list[str] = []
+
+    if not text.strip():
+        return profiles, warnings
+
+    # 全角カンマのみ半角カンマに正規化。
+    # 読点は営業日や備考の内部で使われるため変換しない。
+    text = text.replace("\uff0c", ",")
+
+    for i, line in enumerate(text.strip().splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 3:
+            warnings.append(f"行{i}: フォーマット不正 (フロア,施設タイプ,営業日 が必要): {line}")
+            continue
+
+        floor_label = parts[0]
+        facility_type = parts[1]
+
+        # parts[2:]から曜日フィールドと備考を分離。
+        # 曜日文字のみで構成されるフィールドは営業日の一部とみなす。
+        _day_separators = " \u3000\u3001"  # space, fullwidth space, toten
+        day_parts: list[str] = []
+        notes_start = len(parts)
+        for j, p in enumerate(parts[2:], start=2):
+            stripped = "".join(ch for ch in p if ch not in _day_separators)
+            if stripped and all(ch in _VALID_WEEKDAYS for ch in stripped):
+                day_parts.append(p)
+            else:
+                notes_start = j
+                break
+
+        business_days = parse_business_days("".join(day_parts))
+
+        if not business_days:
+            warnings.append(f"行{i}: 有効な曜日がありません: {parts[2]}")
+            continue
+
+        notes = ",".join(parts[notes_start:]) if notes_start < len(parts) else ""
+        profiles.append(
+            FacilityProfile(
+                facility_type=facility_type,
+                floor_label=floor_label,
+                business_days=business_days,
+                notes=notes,
+            )
+        )
+
+    return profiles, warnings
+
+
+def build_facility_context(profiles: list[FacilityProfile]) -> str:
+    """施設属性情報のコンテキスト文字列を構築。"""
+    if not profiles:
+        return ""
+
+    parts: list[str] = ["【施設属性情報】"]
+    for p in profiles:
+        days_str = ",".join(p.business_days)
+        line = f"- {p.floor_label} ({p.facility_type}): 営業日={days_str}"
+        if p.notes:
+            line += f" / {p.notes}"
+        parts.append(line)
+
+    return "\n".join(parts)
+
+
+def parse_circuit_mapping(text: str) -> tuple[dict[str, str], list[str]]:
+    """
+    回路名称→用途マッピングテキストをパースする。
+
+    入力形式: 1行1エントリ、「回路名:用途」または「回路名→用途」
+
+    Returns:
+        (有効なマッピング, 警告メッセージリスト)
+    """
+    mapping: dict[str, str] = {}
+    warnings: list[str] = []
+
+    if not text.strip():
+        return mapping, warnings
+
+    for i, line in enumerate(text.strip().splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+
+        # 区切り文字を試行
+        for sep in ("\u2192", ":", "\uff1a"):  # arrow, colon, fullwidth colon
+            if sep in line:
+                parts = line.split(sep, 1)
+                circuit_name = parts[0].strip()
+                usage = parts[1].strip()
+                if circuit_name and usage:
+                    mapping[circuit_name] = usage
+                else:
+                    warnings.append(f"行{i}: 回路名または用途が空です: {line}")
+                break
+        else:
+            warnings.append(f"行{i}: 区切り文字が見つかりません (回路名:用途 の形式): {line}")
+
+    return mapping, warnings
 
 
 def parse_monthly_report_csv(path: Path) -> MonthlyReportData:
@@ -407,7 +668,7 @@ def parse_monthly_report_csv(path: Path) -> MonthlyReportData:
 
         if row_name == "最大電力[kW]":
             max_power_daily = values
-        elif row_name == "受電電力":
+        elif row_name == RECEIVED_POWER_CIRCUIT:
             total_power_daily = values
         else:
             circuits[row_name] = values
@@ -508,6 +769,8 @@ def parse_temperature_csv_for_comparison(
 def build_supplementary_context(
     monthly_report: MonthlyReportData | None,
     temperature: tuple[MonthlyTemperatureSummary, MonthlyTemperatureSummary] | None,
+    facility_profiles: list[FacilityProfile] | None = None,
+    circuit_mapping: dict[str, str] | None = None,
 ) -> str:
     """月報・気温データをプロンプト用のコンテキスト文字列に変換。"""
     parts: list[str] = []
@@ -519,22 +782,21 @@ def build_supplementary_context(
 
         if monthly_report.circuits:
             parts.append("- 回路別内訳:")
-            # 電力使用量の多い順にソート
             sorted_circuits = sorted(
                 monthly_report.circuits.items(),
                 key=lambda x: sum(x[1]),
                 reverse=True,
             )
-            for circuit_name, daily_values in sorted_circuits[:10]:  # 上位10回路
+            for circuit_name, daily_values in sorted_circuits[:10]:
                 total = sum(daily_values)
-                parts.append(f"  - {circuit_name}: {total:,.0f} kWh")
+                display_name = _format_circuit_name(circuit_name, circuit_mapping)
+                parts.append(f"  - {display_name}: {total:,.0f} kWh")
 
     if temperature:
         prev, curr = temperature
         parts.append("")
         parts.append("【気温データ】")
 
-        # 年月を読みやすい形式に変換
         prev_label = prev.year_month.replace("-", "年") + "月"
         curr_label = curr.year_month.replace("-", "年") + "月"
 
@@ -550,6 +812,12 @@ def build_supplementary_context(
             f"最低{curr.min_temp:.1f}℃, 平均{curr.avg_temp:.1f}℃ "
             f"(前年比 最高{max_diff:+.1f}℃, 平均{avg_diff:+.1f}℃)"
         )
+
+    # 施設属性情報
+    parts.extend(_build_facility_context_section(facility_profiles))
+
+    # 回路名称→用途マッピング
+    parts.extend(_build_circuit_mapping_section(circuit_mapping))
 
     return "\n".join(parts)
 
@@ -803,7 +1071,7 @@ def parse_power_30min_csv(path: Path) -> MonthlyPowerCalendarData:
     max_demand_summary = max(daily_summaries, key=lambda s: s.max_kwh)
     dt_demand = datetime.strptime(max_demand_summary.date, "%Y-%m-%d")
     max_demand_day = f"{dt_demand.day}日({max_demand_summary.day_of_week})"
-    max_demand_kw = max_demand_summary.max_kwh
+    max_demand_kw = max_demand_summary.max_kwh * 2  # 30分kWh→kW変換
 
     # 平日/休日平均を計算 (土日を休日とみなす)
     weekday_totals = [s.total_kwh for s in daily_summaries if s.day_of_week not in ("土", "日")]
@@ -933,16 +1201,50 @@ def build_power_calendar_context(data: MonthlyPowerCalendarData) -> str:
         dt_obj = __import__("datetime").datetime.strptime(s.date, "%Y-%m-%d")
         day_label = f"{dt_obj.day}日({s.day_of_week})"
         parts.append(
-            f"- {day_label}: {s.total_kwh:,.1f} kWh (最大 {s.max_kwh:.1f} kWh @ {s.max_time})"
+            f"- {day_label}: {s.total_kwh:,.1f} kWh (最大 {s.max_kwh * 2:.1f} kW @ {s.max_time})"
         )
 
     return "\n".join(parts)
+
+
+def _compute_operating_day_averages(
+    daily_summaries: list[DailyPowerSummary],
+    facility_profiles: list[FacilityProfile],
+) -> tuple[float | None, float | None]:
+    """施設属性に基づく稼働日/非稼働日平均を計算。
+
+    稼働日 = いずれかのフロアの営業日に該当する日
+
+    Returns:
+        (稼働日平均kWh or None, 非稼働日平均kWh or None)
+        該当日がない場合はNoneを返す。
+    """
+    # 全フロアの営業日をOR結合
+    all_business_days: set[str] = set()
+    for p in facility_profiles:
+        all_business_days.update(p.business_days)
+
+    operating_totals: list[float] = []
+    non_operating_totals: list[float] = []
+
+    for s in daily_summaries:
+        if s.day_of_week in all_business_days:
+            operating_totals.append(s.total_kwh)
+        else:
+            non_operating_totals.append(s.total_kwh)
+
+    op_avg = sum(operating_totals) / len(operating_totals) if operating_totals else None
+    non_op_avg = (
+        sum(non_operating_totals) / len(non_operating_totals) if non_operating_totals else None
+    )
+    return op_avg, non_op_avg
 
 
 def build_power_calendar_extended_context(
     curr_power: MonthlyPowerCalendarData,
     prev_power: MonthlyPowerCalendarData | None = None,
     temperature: tuple[MonthlyTemperatureSummary, MonthlyTemperatureSummary] | None = None,
+    facility_profiles: list[FacilityProfile] | None = None,
 ) -> str:
     """
     電力カレンダー分析用の拡張コンテキスト文字列を構築。
@@ -953,6 +1255,7 @@ def build_power_calendar_extended_context(
         curr_power: 当年の電力データ
         prev_power: 前年の電力データ (オプション)
         temperature: 気温データ (前年, 当年) のタプル (オプション)
+        facility_profiles: 施設属性データ (オプション)
 
     Returns:
         str: プロンプト用のコンテキスト文字列
@@ -977,6 +1280,16 @@ def build_power_calendar_extended_context(
         ratio = curr_power.weekday_avg_kwh / curr_power.weekend_avg_kwh
         parts.append(f"- 平日/休日比: {ratio:.2f}倍")
 
+    # 稼働日/非稼働日平均 (施設属性がある場合)
+    if facility_profiles and curr_power.daily_summaries:
+        op_avg, non_op_avg = _compute_operating_day_averages(
+            curr_power.daily_summaries, facility_profiles
+        )
+        if op_avg is not None:
+            parts.append(f"- 稼働日平均: {op_avg:,.1f} kWh/日")
+        if non_op_avg is not None:
+            parts.append(f"- 非稼働日平均: {non_op_avg:,.1f} kWh/日")
+
     # 当年電力使用量 上位5日
     parts.append("")
     parts.append("【当年電力使用量 上位5日】")
@@ -985,8 +1298,11 @@ def build_power_calendar_extended_context(
         dt_obj = datetime.strptime(s.date, "%Y-%m-%d")
         day_label = f"{dt_obj.day}日({s.day_of_week})"
         parts.append(
-            f"- {day_label}: {s.total_kwh:,.1f} kWh (最大 {s.max_kwh:.1f} kW @ {s.max_time})"
+            f"- {day_label}: {s.total_kwh:,.1f} kWh (最大 {s.max_kwh * 2:.1f} kW @ {s.max_time})"
         )
+
+    # 施設属性情報
+    parts.extend(_build_facility_context_section(facility_profiles))
 
     # 前年電力データ (存在する場合)
     if prev_power:
@@ -1018,20 +1334,35 @@ def build_power_calendar_extended_context(
         parts.append(f"- 平日平均差: {weekday_diff:+,.1f} kWh/日")
         parts.append(f"- 休日平均差: {weekend_diff:+,.1f} kWh/日")
 
+        # 施設属性がある場合は稼働日/非稼働日ベースの前年比較も出力
+        if facility_profiles and prev_power.daily_summaries:
+            prev_op_avg, prev_non_op_avg = _compute_operating_day_averages(
+                prev_power.daily_summaries, facility_profiles
+            )
+            # 当年の稼働日平均は上で計算済み (curr の daily_summaries がある場合)
+            if curr_power.daily_summaries:
+                curr_op_avg, curr_non_op_avg = _compute_operating_day_averages(
+                    curr_power.daily_summaries, facility_profiles
+                )
+                if curr_op_avg is not None and prev_op_avg is not None:
+                    parts.append(f"- 稼働日平均差: {curr_op_avg - prev_op_avg:+,.1f} kWh/日")
+                if curr_non_op_avg is not None and prev_non_op_avg is not None:
+                    parts.append(
+                        f"- 非稼働日平均差: {curr_non_op_avg - prev_non_op_avg:+,.1f} kWh/日"
+                    )
+
     # 気温データ
     if temperature:
         prev_temp, curr_temp = temperature
         parts.append("")
         parts.append("【気温データ】")
 
-        # 前年気温
         prev_label = prev_temp.year_month.replace("-", "年") + "月"
         parts.append(
             f"- {prev_label}: 最高{prev_temp.max_temp:.1f}℃, "
             f"最低{prev_temp.min_temp:.1f}℃, 平均{prev_temp.avg_temp:.1f}℃"
         )
 
-        # 当年気温
         curr_label = curr_temp.year_month.replace("-", "年") + "月"
         max_diff = curr_temp.max_temp - prev_temp.max_temp
         avg_diff = curr_temp.avg_temp - prev_temp.avg_temp
@@ -1044,9 +1375,98 @@ def build_power_calendar_extended_context(
     return "\n".join(parts)
 
 
+def _format_circuit_name(name: str, circuit_mapping: dict[str, str] | None) -> str:
+    """回路名に用途名を付記する。"""
+    if circuit_mapping and name in circuit_mapping:
+        return f"{name}({circuit_mapping[name]})"
+    return name
+
+
+def _build_circuit_mapping_section(circuit_mapping: dict[str, str] | None) -> list[str]:
+    """回路名称→用途マッピングのコンテキスト行を返す。"""
+    if not circuit_mapping:
+        return []
+    parts: list[str] = ["", "【回路名称→用途】"]
+    for name, usage in circuit_mapping.items():
+        parts.append(f"- {name}: {usage}")
+    return parts
+
+
+def _build_facility_context_section(
+    facility_profiles: list[FacilityProfile] | None,
+) -> list[str]:
+    """施設属性情報のコンテキスト行を返す。"""
+    if not facility_profiles:
+        return []
+    facility_ctx = build_facility_context(facility_profiles)
+    if not facility_ctx:
+        return []
+    return ["", facility_ctx]
+
+
+def _build_peak_circuit_breakdown(
+    peak_circuits: dict[str, float],
+    circuit_mapping: dict[str, str] | None = None,
+    max_circuits: int = 10,
+) -> list[str]:
+    """ピーク時刻の回路別内訳行を返す。"""
+    if not peak_circuits:
+        return []
+    parts: list[str] = ["- ピーク時刻の回路別内訳 (kWh/30分):"]
+    sorted_circuits = sorted(
+        [(name, val) for name, val in peak_circuits.items() if name != RECEIVED_POWER_CIRCUIT],
+        key=lambda x: x[1],
+        reverse=True,
+    )
+    for circuit_name, value in sorted_circuits[:max_circuits]:
+        kw_value = value * 2
+        display_name = _format_circuit_name(circuit_name, circuit_mapping)
+        parts.append(f"  - {display_name}: {kw_value:.1f} kW ({value:.2f} kWh)")
+    return parts
+
+
+def _build_3point_section(
+    peak_data: PeakDayPowerData,
+    label: str,
+    circuit_mapping: dict[str, str] | None = None,
+) -> list[str]:
+    """3点比較 (前時限→ピーク→次時限) セクションを構築。"""
+    parts: list[str] = []
+    three_point = peak_data.get_circuit_power_3point()
+    if not three_point:
+        return parts
+
+    # 受電電力のピーク値と前後をチェック
+    recv = three_point.get(RECEIVED_POWER_CIRCUIT)
+    if recv:
+        prev_val, peak_val, next_val = recv
+        # ガード: ピーク値が正で前後の両方が0.0の場合のみデータ不足と判断
+        # (片側だけ0.0は有効な計測値の可能性がある)
+        if (
+            peak_val > 0
+            and prev_val is not None
+            and prev_val == 0.0
+            and next_val is not None
+            and next_val == 0.0
+        ):
+            parts.append(f"- {label}3点比較: (データ不足のため3点比較なし)")
+            return parts
+
+    parts.append(f"- {label}3点比較 (前時限→ピーク→次時限):")
+    for circuit_name, (prev_v, peak_v, next_v) in three_point.items():
+        display_name = _format_circuit_name(circuit_name, circuit_mapping)
+        prev_kw = f"{prev_v * 2:.1f}" if prev_v is not None else "-"
+        peak_kw = f"{peak_v * 2:.1f}"
+        next_kw = f"{next_v * 2:.1f}" if next_v is not None else "-"
+        parts.append(f"  - {display_name}: {prev_kw} → {peak_kw} → {next_kw} kW")
+
+    return parts
+
+
 def build_peak_day_comparison_context(
     curr_peak: PeakDayPowerData | None,
     prev_peak: PeakDayPowerData | None = None,
+    circuit_mapping: dict[str, str] | None = None,
 ) -> str:
     """
     最大デマンド発生日の前年比較コンテキスト文字列を構築。
@@ -1056,6 +1476,7 @@ def build_peak_day_comparison_context(
     Args:
         curr_peak: 当年の最大デマンド発生日データ
         prev_peak: 前年の最大デマンド発生日データ (オプション)
+        circuit_mapping: 回路名→用途名のマッピング (オプション)
 
     Returns:
         str: プロンプト用のコンテキスト文字列
@@ -1072,17 +1493,13 @@ def build_peak_day_comparison_context(
 
     # 当年ピーク時の回路別内訳
     curr_peak_circuits = curr_peak.get_circuit_power_at_peak()
-    if curr_peak_circuits:
-        parts.append("- ピーク時刻の回路別内訳 (kWh/30分):")
-        # 電力順でソート (受電電力を除く)
-        sorted_circuits = sorted(
-            [(name, val) for name, val in curr_peak_circuits.items() if name != "受電電力"],
-            key=lambda x: x[1],
-            reverse=True,
-        )
-        for circuit_name, value in sorted_circuits[:10]:  # 上位10回路
-            kw_value = value * 2  # kWh/30min -> kW
-            parts.append(f"  - {circuit_name}: {kw_value:.1f} kW ({value:.2f} kWh)")
+    parts.extend(_build_peak_circuit_breakdown(curr_peak_circuits, circuit_mapping))
+
+    # 当年3点比較
+    parts.extend(_build_3point_section(curr_peak, "当年", circuit_mapping))
+
+    # 回路マッピング情報
+    parts.extend(_build_circuit_mapping_section(circuit_mapping))
 
     # 前年データ (存在する場合)
     if prev_peak:
@@ -1091,18 +1508,11 @@ def build_peak_day_comparison_context(
         parts.append(f"- 最大デマンド発生時刻: {prev_peak.peak_time}")
         parts.append(f"- 最大デマンド値: {prev_peak.peak_power_kw:.1f} kW")
 
-        # 前年ピーク時の回路別内訳
         prev_peak_circuits = prev_peak.get_circuit_power_at_peak()
-        if prev_peak_circuits:
-            parts.append("- ピーク時刻の回路別内訳 (kWh/30分):")
-            sorted_circuits = sorted(
-                [(name, val) for name, val in prev_peak_circuits.items() if name != "受電電力"],
-                key=lambda x: x[1],
-                reverse=True,
-            )
-            for circuit_name, value in sorted_circuits[:10]:
-                kw_value = value * 2
-                parts.append(f"  - {circuit_name}: {kw_value:.1f} kW ({value:.2f} kWh)")
+        parts.extend(_build_peak_circuit_breakdown(prev_peak_circuits, circuit_mapping))
+
+        # 前年3点比較
+        parts.extend(_build_3point_section(prev_peak, "前年", circuit_mapping))
 
         # 前年比較
         parts.append("")
@@ -1114,32 +1524,30 @@ def build_peak_day_comparison_context(
         else:
             parts.append(f"- 最大デマンド変化: {power_diff:+.1f} kW")
 
-        # 発生時刻の比較
         if curr_peak.peak_time and prev_peak.peak_time:
             if curr_peak.peak_time == prev_peak.peak_time:
                 parts.append(f"- 発生時刻: 同一 ({curr_peak.peak_time})")
             else:
                 parts.append(f"- 発生時刻: {prev_peak.peak_time} → {curr_peak.peak_time}")
 
-        # 回路別変化 (主要回路のみ)
         if curr_peak_circuits and prev_peak_circuits:
             parts.append("- 回路別変化 (主要回路):")
             common_circuits = set(curr_peak_circuits.keys()) & set(prev_peak_circuits.keys())
             changes: list[tuple[str, float, float, float]] = []
             for circuit_name in common_circuits:
-                if circuit_name == "受電電力":
+                if circuit_name == RECEIVED_POWER_CIRCUIT:
                     continue
-                curr_val = curr_peak_circuits[circuit_name] * 2  # kW
-                prev_val = prev_peak_circuits[circuit_name] * 2  # kW
+                curr_val = curr_peak_circuits[circuit_name] * 2
+                prev_val = prev_peak_circuits[circuit_name] * 2
                 diff = curr_val - prev_val
-                if abs(diff) >= 0.5:  # 0.5kW以上の変化のみ表示
+                if abs(diff) >= 0.5:
                     changes.append((circuit_name, curr_val, prev_val, diff))
 
-            # 変化量の大きい順にソート
             changes.sort(key=lambda x: abs(x[3]), reverse=True)
             for circuit_name, curr_val, prev_val, diff in changes[:5]:
+                display_name = _format_circuit_name(circuit_name, circuit_mapping)
                 parts.append(
-                    f"  - {circuit_name}: {prev_val:.1f} kW → {curr_val:.1f} kW ({diff:+.1f} kW)"
+                    f"  - {display_name}: {prev_val:.1f} kW → {curr_val:.1f} kW ({diff:+.1f} kW)"
                 )
 
     return "\n".join(parts)
