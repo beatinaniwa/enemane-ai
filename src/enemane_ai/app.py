@@ -380,6 +380,8 @@ def parse_floor_attributes_input(text: str) -> list[FloorAttribute]:
         if len(parts) >= 2:
             name = parts[0].strip()
             usage = parts[1].strip()
+            if not name or not usage:
+                continue
             notes = parts[2].strip() if len(parts) >= 3 else ""
             result.append(FloorAttribute(name=name, usage=usage, notes=notes))
     return result

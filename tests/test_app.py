@@ -321,6 +321,15 @@ def test_parse_floor_attributes_input_notes_with_comma() -> None:
     assert result[0].notes == "水木定休, 土日営業"
 
 
+def test_parse_floor_attributes_input_skips_incomplete_rows() -> None:
+    text = "1F,\n, オフィス\n2F, ショールーム"
+    result = parse_floor_attributes_input(text)
+
+    assert len(result) == 1
+    assert result[0].name == "2F"
+    assert result[0].usage == "ショールーム"
+
+
 def test_parse_floor_attributes_input_empty() -> None:
     assert parse_floor_attributes_input("") == []
     assert parse_floor_attributes_input("  \n  ") == []
