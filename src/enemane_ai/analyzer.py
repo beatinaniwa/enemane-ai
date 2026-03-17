@@ -122,6 +122,8 @@ OUTPUT_FORMAT_INSTRUCTION = dedent(
     - 平均気温: 累積使用量(kWh)の増減との関連を示唆する際の参考
     - 最低気温: 暖房早朝負荷との関連を示唆する際の参考
     - 気温差が小さい場合は気温以外の要因(稼働日数差、設備変更等)も併せて検討する
+    - 気温は主にkWh(累積使用量)に強く影響する。kW(デマンド)への影響は間接的・限定的であるため、
+      「最大電力[kW]」コメント内で気温に言及する場合は「間接的な影響の可能性」として推測表現を使うこと。
 
     ■ 前年比較の計算:
     - 【前年同月データ】の数値を使って前年比を計算
@@ -254,6 +256,9 @@ PRESET_PROMPT = (
     - 先月比[%]=(今月-先月)/先月x100
     - 上位3/5回路の合計比率[%]、計測カバー率[%]=計測回路合計/受電電力量x100
     - 集約カテゴリは**比較に使わない**(「比較不可(集約)」と記載)。
+    - 前月比(先月比)を記述する場合は、必ず基準となる前月の具体的な値を明記すること。
+      NG例: 「前月比+596 kWh」
+      OK例: 「前月(9月: 8,500 kWh)と比較して+596 kWh(+7.0%)増加」
 
     ========================
     ■ 出力(Markdown。各グラフ=見出し+1〜3文。長文禁止)
@@ -279,6 +284,25 @@ PRESET_PROMPT = (
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tiff"}
 CSV_EXTENSIONS = {".csv"}
 DEFAULT_MODEL_NAME = "gemini-3-pro-preview"
+
+
+@dataclass
+class FloorAttribute:
+    """フロア・エリアごとの属性"""
+
+    name: str  # "1F", "3F"
+    usage: str  # "ショールーム", "オフィス"
+    notes: str = ""  # "水木定休・土日営業"
+
+
+@dataclass
+class FacilityContext:
+    """施設・回路の属性情報"""
+
+    building_type: str = ""
+    floor_attributes: list[FloorAttribute] = field(default_factory=list)
+    regular_holidays: list[str] = field(default_factory=list)  # ["水", "木"]
+    circuit_name_mappings: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -554,6 +578,78 @@ def parse_temperature_csv_for_comparison(
     )
 
     return prev_summary, curr_summary
+
+
+_DAY_LABEL = {
+    "月": "月曜",
+    "火": "火曜",
+    "水": "水曜",
+    "木": "木曜",
+    "金": "金曜",
+    "土": "土曜",
+    "日": "日曜",
+}
+
+
+def build_facility_context(facility: FacilityContext | None) -> str:
+    """施設属性情報をプロンプト用のコンテキスト文字列に変換。"""
+    if facility is None:
+        return ""
+
+    parts: list[str] = []
+
+    # 事前計算: 定休日ラベル (2回使うので1度だけ算出)
+    has_building_type = bool(facility.building_type)
+    has_holidays = bool(facility.regular_holidays)
+    day_labels = [_DAY_LABEL.get(d, d) for d in facility.regular_holidays] if has_holidays else []
+
+    # 施設情報セクション
+    if has_building_type or has_holidays:
+        parts.append("【施設情報】")
+        if has_building_type:
+            parts.append(f"- 施設種別: {facility.building_type}")
+        if day_labels:
+            parts.append(f"- 定休日: {'・'.join(day_labels)}")
+
+    # フロア・エリア属性セクション
+    if facility.floor_attributes:
+        parts.append("")
+        parts.append("【フロア・エリア属性】")
+        for attr in facility.floor_attributes:
+            if attr.notes:
+                parts.append(f"- {attr.name}: {attr.usage}（{attr.notes}）")  # noqa: RUF001
+            else:
+                parts.append(f"- {attr.name}: {attr.usage}")
+
+    # 回路名マッピングセクション
+    if facility.circuit_name_mappings:
+        parts.append("")
+        parts.append("【回路名の用途マッピング】")
+        for circuit, usage in facility.circuit_name_mappings.items():
+            parts.append(f"- {circuit} → {usage}")
+
+    # 注意事項セクション (実際にコンテンツがある場合のみ)
+    notice_lines: list[str] = []
+    if has_holidays:
+        business_weekend = {"土", "日"} - set(facility.regular_holidays)
+        note_parts = [
+            f"- 「平日/休日」の分類は上記の定休日を基準に判断すること。"
+            f"{'・'.join(day_labels)}は非営業日"
+        ]
+        if business_weekend:
+            bw_labels = [_DAY_LABEL.get(d, d) for d in sorted(business_weekend)]
+            note_parts.append(f"、{'・'.join(bw_labels)}は営業日")
+        note_parts.append("。")
+        notice_lines.append("".join(note_parts))
+    if facility.circuit_name_mappings:
+        notice_lines.append("- 回路名から用途を推測する際は上記マッピングを優先すること。")
+
+    if notice_lines:
+        parts.append("")
+        parts.append("【分析上の注意事項】")
+        parts.extend(notice_lines)
+
+    return "\n".join(parts)
 
 
 def build_supplementary_context(

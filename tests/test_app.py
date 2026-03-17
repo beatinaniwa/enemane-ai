@@ -2,18 +2,21 @@ from pathlib import Path
 
 from PIL import Image
 
-from enemane_ai.analyzer import PRESET_PROMPT
+from enemane_ai.analyzer import PRESET_PROMPT, FacilityContext, FloorAttribute
 from enemane_ai.app import (
     AnalyzedGraph,
     CalendarAnalysisRow,
     OutputRow,
     ResultRow,
     analyze_files,
+    analyze_graphs_with_context,
     build_result_rows,
     export_calendar_analysis_csv,
     export_table_csv,
     export_target_format_csv,
     parse_calendar_analysis_response,
+    parse_circuit_mapping_input,
+    parse_floor_attributes_input,
     parse_multi_item_response,
     parse_structured_comment,
 )
@@ -278,3 +281,155 @@ def test_export_calendar_analysis_csv_has_bom_and_correct_headers() -> None:
     assert lines[0] == "項目,事実+仮説"
     assert "全体傾向,10月は減少傾向" in lines[1]
     assert "最大需要日の確認,22日が最大" in lines[2]
+
+
+# =============================================================================
+# 施設情報パーサーのテスト
+# =============================================================================
+
+
+def test_parse_floor_attributes_input_basic() -> None:
+    text = "1F, ショールーム, 水木定休・土日営業\n3F, オフィス, 土日休み"
+    result = parse_floor_attributes_input(text)
+
+    assert len(result) == 2
+    assert result[0].name == "1F"
+    assert result[0].usage == "ショールーム"
+    assert result[0].notes == "水木定休・土日営業"
+    assert result[1].name == "3F"
+    assert result[1].usage == "オフィス"
+    assert result[1].notes == "土日休み"
+
+
+def test_parse_floor_attributes_input_without_notes() -> None:
+    text = "1F, ショールーム"
+    result = parse_floor_attributes_input(text)
+
+    assert len(result) == 1
+    assert result[0].name == "1F"
+    assert result[0].usage == "ショールーム"
+    assert result[0].notes == ""
+
+
+def test_parse_floor_attributes_input_notes_with_comma() -> None:
+    text = "1F, ショールーム, 水木定休, 土日営業"
+    result = parse_floor_attributes_input(text)
+
+    assert len(result) == 1
+    assert result[0].name == "1F"
+    assert result[0].usage == "ショールーム"
+    assert result[0].notes == "水木定休, 土日営業"
+
+
+def test_parse_floor_attributes_input_empty() -> None:
+    assert parse_floor_attributes_input("") == []
+    assert parse_floor_attributes_input("  \n  ") == []
+
+
+def test_parse_circuit_mapping_input_arrow() -> None:
+    text = "1F事務所SR → ショールーム\n3F事務所 → オフィス\n1F動力 → 空調・設備系"
+    result = parse_circuit_mapping_input(text)
+
+    assert result == {
+        "1F事務所SR": "ショールーム",
+        "3F事務所": "オフィス",
+        "1F動力": "空調・設備系",
+    }
+
+
+def test_parse_circuit_mapping_input_ascii_arrow() -> None:
+    text = "1F事務所SR -> ショールーム\n3F事務所 -> オフィス"
+    result = parse_circuit_mapping_input(text)
+
+    assert result == {
+        "1F事務所SR": "ショールーム",
+        "3F事務所": "オフィス",
+    }
+
+
+def test_parse_circuit_mapping_input_empty() -> None:
+    assert parse_circuit_mapping_input("") == {}
+    assert parse_circuit_mapping_input("  \n  ") == {}
+
+
+# =============================================================================
+# 施設コンテキスト結合テスト
+# =============================================================================
+
+
+def test_analyze_with_facility_context(tmp_path: Path) -> None:
+    """DummyLLMで施設コンテキストがプロンプトに含まれることを確認."""
+    img_path = tmp_path / "plot.png"
+    Image.new("RGB", (10, 10), "white").save(img_path)
+
+    class CaptureLLM:
+        def __init__(self) -> None:
+            self.last_prompt: str | None = None
+
+        def comment_on_graph(self, image, prompt):  # type: ignore[no-untyped-def]
+            self.last_prompt = prompt
+            return '[{"graph_name": "test", "item_name": "kW", "comment": "test comment"}]'
+
+        def comment_on_text(self, text, prompt):  # type: ignore[no-untyped-def]
+            self.last_prompt = prompt
+            return "text"
+
+    llm = CaptureLLM()
+    facility = FacilityContext(
+        building_type="ショールーム",
+        floor_attributes=[
+            FloorAttribute(name="1F", usage="ショールーム", notes="水木定休"),
+        ],
+        regular_holidays=["水", "木"],
+        circuit_name_mappings={"1F事務所SR": "ショールーム"},
+    )
+
+    results = analyze_graphs_with_context(
+        graph_paths=[img_path],
+        monthly_report=None,
+        temperature=None,
+        peak_day_data=None,
+        base_prompt=PRESET_PROMPT,
+        llm=llm,
+        facility=facility,
+    )
+
+    assert len(results) == 1
+    assert llm.last_prompt is not None
+    assert "【施設情報】" in llm.last_prompt
+    assert "ショールーム" in llm.last_prompt
+    assert "1F事務所SR → ショールーム" in llm.last_prompt
+    assert "水曜" in llm.last_prompt
+
+
+def test_analyze_without_facility_context(tmp_path: Path) -> None:
+    """施設情報なしで従来と同じ動作."""
+    img_path = tmp_path / "plot.png"
+    Image.new("RGB", (10, 10), "white").save(img_path)
+
+    class CaptureLLM:
+        def __init__(self) -> None:
+            self.last_prompt: str | None = None
+
+        def comment_on_graph(self, image, prompt):  # type: ignore[no-untyped-def]
+            self.last_prompt = prompt
+            return '[{"graph_name": "test", "item_name": "kW", "comment": "test comment"}]'
+
+        def comment_on_text(self, text, prompt):  # type: ignore[no-untyped-def]
+            self.last_prompt = prompt
+            return "text"
+
+    llm = CaptureLLM()
+
+    results = analyze_graphs_with_context(
+        graph_paths=[img_path],
+        monthly_report=None,
+        temperature=None,
+        peak_day_data=None,
+        base_prompt=PRESET_PROMPT,
+        llm=llm,
+    )
+
+    assert len(results) == 1
+    assert llm.last_prompt is not None
+    assert "【施設情報】" not in llm.last_prompt
