@@ -10,6 +10,8 @@ from enemane_ai import analyzer
 from enemane_ai.analyzer import (
     PRESET_PROMPT,
     DailyPowerSummary,
+    FacilityContext,
+    FloorAttribute,
     MonthlyPowerCalendarData,
     MonthlyReportData,
     MonthlyTemperatureSummary,
@@ -17,6 +19,7 @@ from enemane_ai.analyzer import (
     PeakDayPowerData,
     analyze_image,
     analyze_text,
+    build_facility_context,
     build_peak_day_comparison_context,
     build_power_calendar_context,
     build_power_calendar_extended_context,
@@ -105,7 +108,7 @@ def test_collect_graph_entries_from_png_and_pdf(tmp_path: Path) -> None:
 def test_collect_graph_entries_from_temperature_csv(tmp_path: Path) -> None:
     csv_path = tmp_path / "temperature.csv"
     csv_path.write_text(
-        "date,temp_c\n" "2024-01-01,8.5\n" "2024-01-02,12.3\n" "2024-01-03,5.0\n",
+        "date,temp_c\n2024-01-01,8.5\n2024-01-02,12.3\n2024-01-03,5.0\n",
         encoding="utf-8",
     )
 
@@ -274,9 +277,7 @@ def test_parse_temperature_csv_for_comparison_no_matching_month(
     """同じ月の前年・当年データがない場合はエラー."""
     csv_path = tmp_path / "temp.csv"
     csv_path.write_text(
-        "年月日時,気温(℃),品質\n"
-        "2023/10/1 1:00:00,22.9,8\n"
-        "2024/11/1 1:00:00,25.0,8\n",  # 異なる月
+        "年月日時,気温(℃),品質\n2023/10/1 1:00:00,22.9,8\n2024/11/1 1:00:00,25.0,8\n",  # 異なる月
         encoding="utf-8",
     )
 
@@ -711,7 +712,7 @@ def test_parse_peak_day_power_csv_shift_jis(tmp_path: Path) -> None:
     """Shift_JISエンコーディングのCSVをパースできること."""
     csv_path = tmp_path / "test.csv"
     csv_path.write_bytes(
-        ("(4) 詳細データ\n" "2024/10/02,0:00,0:30\n" "受電電力,4.18,4.20\n").encode("cp932")
+        ("(4) 詳細データ\n2024/10/02,0:00,0:30\n受電電力,4.18,4.20\n").encode("cp932")
     )
 
     data = parse_peak_day_power_csv(csv_path)
@@ -734,7 +735,7 @@ def test_parse_peak_day_power_csv_invalid_date(tmp_path: Path) -> None:
     """日付フォーマットが不正な場合はエラー."""
     csv_path = tmp_path / "invalid_date.csv"
     csv_path.write_text(
-        "(4) 詳細データ\n" "invalid_date,0:00,0:30\n" "受電電力,4.18,4.20\n",
+        "(4) 詳細データ\ninvalid_date,0:00,0:30\n受電電力,4.18,4.20\n",
         encoding="utf-8",
     )
 
@@ -881,3 +882,64 @@ def test_build_peak_day_comparison_context_same_time() -> None:
     context = build_peak_day_comparison_context(curr, prev)
 
     assert "同一 (14:30)" in context
+
+
+# =============================================================================
+# 施設コンテキスト生成のテスト
+# =============================================================================
+
+
+def test_build_facility_context_full() -> None:
+    """全フィールド入力時の出力検証."""
+    facility = FacilityContext(
+        building_type="ショールーム",
+        floor_attributes=[
+            FloorAttribute(name="1F", usage="ショールーム", notes="水木定休・土日営業"),
+            FloorAttribute(name="3F", usage="オフィス", notes="土日休み"),
+        ],
+        regular_holidays=["水", "木"],
+        circuit_name_mappings={
+            "1F事務所SR": "ショールーム",
+            "3F事務所": "オフィス",
+            "1F動力": "空調・設備系",
+        },
+    )
+
+    context = build_facility_context(facility)
+
+    assert "【施設情報】" in context
+    assert "ショールーム" in context
+    assert "水曜" in context
+    assert "木曜" in context
+    assert "【フロア・エリア属性】" in context
+    assert "1F: ショールーム（水木定休・土日営業）" in context  # noqa: RUF001
+    assert "3F: オフィス（土日休み）" in context  # noqa: RUF001
+    assert "【回路名の用途マッピング】" in context
+    assert "1F事務所SR → ショールーム" in context
+    assert "3F事務所 → オフィス" in context
+    assert "1F動力 → 空調・設備系" in context
+    assert "【分析上の注意事項】" in context
+
+
+def test_build_facility_context_none() -> None:
+    """None時に空文字列."""
+    context = build_facility_context(None)
+    assert context == ""
+
+
+def test_build_facility_context_partial() -> None:
+    """一部のみ入力時."""
+    facility = FacilityContext(
+        building_type="オフィス",
+        regular_holidays=["土", "日"],
+    )
+
+    context = build_facility_context(facility)
+
+    assert "【施設情報】" in context
+    assert "オフィス" in context
+    assert "土曜" in context
+    assert "日曜" in context
+    # floor_attributes / circuit_name_mappings が空なのでセクション自体が出ない
+    assert "【フロア・エリア属性】" not in context
+    assert "【回路名の用途マッピング】" not in context

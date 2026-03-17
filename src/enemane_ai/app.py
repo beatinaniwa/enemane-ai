@@ -22,6 +22,8 @@ from enemane_ai.analyzer import (
     OUTPUT_FORMAT_INSTRUCTION,
     PRESET_PROMPT,
     ArticleProgressInfo,
+    FacilityContext,
+    FloorAttribute,
     GeminiGraphLanguageModel,
     GraphLanguageModel,
     MonthlyPowerCalendarData,
@@ -29,6 +31,7 @@ from enemane_ai.analyzer import (
     MonthlyTemperatureSummary,
     PeakDayPowerData,
     analyze_image,
+    build_facility_context,
     build_peak_day_comparison_context,
     build_power_calendar_extended_context,
     build_supplementary_context,
@@ -366,6 +369,43 @@ def export_target_format_csv(results: list[OutputRow]) -> bytes:
     return ("\ufeff" + buffer.getvalue()).encode("utf-8")
 
 
+def parse_floor_attributes_input(text: str) -> list[FloorAttribute]:
+    """テキストエリア入力をFloorAttributeリストにパース。"""
+    result: list[FloorAttribute] = []
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(",", 2)
+        if len(parts) >= 2:
+            name = parts[0].strip()
+            usage = parts[1].strip()
+            if not name or not usage:
+                continue
+            notes = parts[2].strip() if len(parts) >= 3 else ""
+            result.append(FloorAttribute(name=name, usage=usage, notes=notes))
+    return result
+
+
+def parse_circuit_mapping_input(text: str) -> dict[str, str]:
+    """テキストエリア入力を回路名→用途の辞書にパース。「→」「->」両方対応。"""
+    result: dict[str, str] = {}
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # 「→」または「->」で分割
+        for sep in ["→", "->"]:
+            if sep in line:
+                parts = line.split(sep, 1)
+                key = parts[0].strip()
+                value = parts[1].strip()
+                if key and value:
+                    result[key] = value
+                break
+    return result
+
+
 def analyze_graphs_with_context(
     graph_paths: list[Path],
     monthly_report: MonthlyReportData | None,
@@ -373,6 +413,7 @@ def analyze_graphs_with_context(
     peak_day_data: tuple[PeakDayPowerData | None, PeakDayPowerData | None] | None,
     base_prompt: str,
     llm: GraphLanguageModel,
+    facility: FacilityContext | None = None,
 ) -> list[OutputRow]:
     """
     グラフ画像を補助データのコンテキスト付きで分析し、OutputRowのリストを返す。
@@ -384,10 +425,14 @@ def analyze_graphs_with_context(
         peak_day_data: 最大デマンド発生日データ (当年, 前年) (オプション)
         base_prompt: ベースプロンプト
         llm: LLMクライアント
+        facility: 施設コンテキスト (オプション)
 
     Returns:
         list[OutputRow]: 分析結果のリスト
     """
+    # 施設コンテキストを構築
+    facility_context = build_facility_context(facility)
+
     # 補助データコンテキストを構築
     context = build_supplementary_context(monthly_report, temperature)
 
@@ -398,11 +443,14 @@ def analyze_graphs_with_context(
         if peak_context:
             context = f"{context}\n\n{peak_context}" if context else peak_context
 
-    # プロンプトを構築
-    full_prompt = base_prompt
+    # プロンプトを構築: base_prompt → facility_context → context → OUTPUT_FORMAT_INSTRUCTION
+    prompt_parts = [base_prompt]
+    if facility_context:
+        prompt_parts.append(facility_context)
     if context:
-        full_prompt = f"{base_prompt}\n\n{context}"
-    full_prompt = f"{full_prompt}\n\n{OUTPUT_FORMAT_INSTRUCTION}"
+        prompt_parts.append(context)
+    prompt_parts.append(OUTPUT_FORMAT_INSTRUCTION)
+    full_prompt = "\n\n".join(prompt_parts)
 
     all_results: list[OutputRow] = []
     entries = collect_graph_entries(graph_paths)
@@ -515,13 +563,70 @@ def render_graph_analysis_tab() -> None:
             help="前年の最大デマンド発生日の30分間隔データ",
         )
 
-    st.subheader("4. 追加指示 (オプション)")
+    st.subheader("4. 施設情報・追加指示 (オプション)")
+
+    with st.expander("施設・回路の属性設定", expanded=False):
+        # A: 施設種別
+        col_a1, col_a2 = st.columns(2)
+        with col_a1:
+            building_type = st.selectbox(
+                "施設種別",
+                options=["", "ショールーム", "工場", "オフィス", "複合施設", "その他"],
+                key="graph_building_type",
+            )
+        with col_a2:
+            custom_building_type = st.text_input(
+                "その他の施設種別",
+                key="graph_custom_building_type",
+                disabled=(building_type != "その他"),
+            )
+
+        # B: 定休日
+        holidays = st.multiselect(
+            "定休日（非営業日）",  # noqa: RUF001
+            options=["月", "火", "水", "木", "金", "土", "日"],
+            key="graph_holidays",
+        )
+
+        # C: フロア属性(1行1エントリ: フロア名, 用途, 備考)
+        floor_attributes_text = st.text_area(
+            "フロア属性（1行に1つ: フロア名, 用途, 備考）",  # noqa: RUF001
+            placeholder="1F, ショールーム, 水木定休・土日営業\n3F, オフィス, 土日休み",
+            height=100,
+            key="graph_floor_attributes",
+        )
+
+        # D: 回路名マッピング(1行1エントリ: 回路名 -> 用途)
+        circuit_mapping_text = st.text_area(
+            "回路名 → 用途マッピング",
+            placeholder="1F事務所SR → ショールーム\n3F事務所 → オフィス\n1F動力 → 空調・設備系",
+            height=100,
+            key="graph_circuit_mapping",
+        )
+
+    # 自由記述(expander外に残す)
     additional_instructions = st.text_area(
-        "追加の指示",
+        "追加の指示（自由記述）",  # noqa: RUF001
         placeholder="例: 重要なトレンドのみを箇条書きでまとめてください。",
         height=80,
         key="graph_additional_instructions",
     )
+
+    # FacilityContextを構築
+    effective_building_type = (
+        custom_building_type.strip() if building_type == "その他" else building_type
+    )
+    floor_attrs = parse_floor_attributes_input(floor_attributes_text)
+    circuit_mappings = parse_circuit_mapping_input(circuit_mapping_text)
+
+    facility: FacilityContext | None = None
+    if effective_building_type or holidays or floor_attrs or circuit_mappings:
+        facility = FacilityContext(
+            building_type=effective_building_type,
+            floor_attributes=floor_attrs,
+            regular_holidays=holidays,
+            circuit_name_mappings=circuit_mappings,
+        )
 
     prompt = PRESET_PROMPT
     if additional_instructions.strip():
@@ -613,6 +718,7 @@ def render_graph_analysis_tab() -> None:
                         peak_day_data=(curr_peak_data, prev_peak_data),
                         base_prompt=prompt,
                         llm=llm,
+                        facility=facility,
                     )
                 except Exception as exc:
                     status.update(label="失敗", state="error")
